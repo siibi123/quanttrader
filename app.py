@@ -214,8 +214,8 @@ if run:
 # ---------------------------------------------------------------------------
 # TABS — CHART | METRICS | TRADES | AUDIT
 # ---------------------------------------------------------------------------
-t_chart, t_metrics, t_trades, t_audit = st.tabs(
-    ["CHART", "METRICS", "TRADES", "AUDIT"])
+t_chart, t_metrics, t_trades, t_lab, t_audit = st.tabs(
+    ["CHART", "METRICS", "TRADES", "LAB", "AUDIT"])
 
 with t_chart:
     iv = {"1h": ("1h", "720d"), "1d": ("1d", "2y"),
@@ -328,6 +328,53 @@ with t_trades:
             st.caption("No fills yet — only what survives the gates AND "
                        "the veto trades.")
 
+with t_lab:
+    from quant.sltp_opt import optimize_sltp
+    from quant.var_lab import var_suite
+    lc1, lc2 = st.columns(2)
+    with lc1:
+        st.markdown("### 🧮 VaR Lab")
+        vm = st.selectbox("Method", ["historical", "parametric",
+                                     "cornish_fisher", "ewma"])
+        vc, vh = st.columns(2)
+        conf = vc.slider("Confidence %", 90.0, 99.9, 95.0, 0.5)
+        hor = vh.slider("Horizon (days)", 1, 30, 1)
+        look = st.slider("Lookback", 30, 500, 252)
+        if st.button("Calculate VaR", use_container_width=True):
+            d_ = E["provider"].get_candles(chart_sym)
+            r_ = var_suite(d_["Close"], method=vm, conf=conf / 100,
+                           horizon=hor, lookback=look,
+                           value=broker.equity(marks))
+            if "error" in r_:
+                st.warning(r_["error"])
+            else:
+                m1, m2 = st.columns(2)
+                m1.metric(f"VaR {conf:.0f}% / {hor}d",
+                          f"${r_['VaR_$']:,.0f}", f"{r_['VaR_pct']}%")
+                m2.metric("CVaR (expected shortfall)",
+                          f"${r_['CVaR_$']:,.0f}", f"{r_['CVaR_pct']}%")
+                st.caption(f"{vm} · {r_['lookback']} obs · on current "
+                           f"paper equity")
+    with lc2:
+        st.markdown("### 🎯 SL/TP Optimizer")
+        rank = st.selectbox("Rank by", ["sharpe", "pf", "win", "return",
+                                        "min_dd", "expect", "rr"])
+        hold_ = st.slider("Max hold (bars)", 5, 60, 20)
+        if st.button("Optimize stops & targets", use_container_width=True):
+            with st.spinner("Replaying every model signal × 25 combos…"):
+                d_ = E["provider"].get_candles(chart_sym)
+                g_ = optimize_sltp(d_, hold=hold_, rank_by=rank,
+                                   capital=broker.equity(marks))
+            if len(g_):
+                b_ = g_.iloc[0]
+                st.success(f"Best: SL {b_['SL']}×ATR / TP {b_['TP']}×ATR — "
+                           f"{b_['win_pct']}% win · PF {b_['PF']} · "
+                           f"Sharpe {b_['sharpe']} · DD {b_['max_dd_pct']}%")
+                st.dataframe(g_, use_container_width=True, hide_index=True,
+                             height=300)
+            else:
+                st.info("Not enough BUY signals in history to optimize.")
+
 with t_audit:
     st.markdown("### Audit timeline — trigger → model → reasoning")
     tail = audit.tail(20)
@@ -343,5 +390,5 @@ with t_audit:
     else:
         st.caption("Nothing yet — run a decision cycle.")
 
-st.caption("QuantTrader v0.3 FUSION · QuantSignal brain inside · LSE vault contract verified from official "
+st.caption("QuantTrader v0.4 · QuantSignal brain inside · LSE vault contract verified from official "
            "SDK · paper-only by constitution · keys via Secrets/.env only")
