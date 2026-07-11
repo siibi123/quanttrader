@@ -22,6 +22,9 @@ import pandas as pd
 from core.engine import AuditLog, Order, PaperBroker, RiskEngine
 from core.state import EventBus, GlobalState
 from data.providers import DataProvider
+from quant.playbook import build_playbook
+from quant.risk import correlation_heat, portfolio_var
+from quant.verdict import analyze as qs_verdict
 
 TOOL_SCHEMAS = [
     {"name": "get_state",
@@ -81,35 +84,71 @@ class RuleOrchestrator:
                        axis=1).max(axis=1)
         return float(tr.rolling(n).mean().iloc[-1])
 
-    def analyze(self, symbol: str) -> dict:
+    def analyze(self, symbol: str, equity: float = 10000.0,
+                risk_pct: float = 1.0, held: dict | None = None) -> dict:
+        """QuantSignal fusion: the 5-gate Playbook + 7-model verdict drive
+        the signal; the reasoning IS the playbook instruction."""
         df = self._provider.get_candles(symbol)
         if len(df) < 220:
             return {"symbol": symbol, "signal": "NONE",
                     "why": "insufficient history"}
-        c = df["Close"]
-        price = float(c.iloc[-1])
-        s200 = float(c.rolling(200).mean().iloc[-1])
-        s20 = float(c.rolling(20).mean().iloc[-1])
-        s50 = float(c.rolling(50).mean().iloc[-1])
-        r2 = self._rsi(c)
-        a = self._atr(df)
-        sig, why = "NONE", []
-        if price > s200:
-            why.append(f"regime OK (px {price:.2f} > 200SMA {s200:.2f})")
-            if r2 < 10:
-                sig = "BUY"
-                why.append(f"RSI2 panic ({r2:.0f}<10) in uptrend")
-            elif s20 > s50 and price > s20:
-                sig = "BUY"
-                why.append("20>50 SMA trend alignment")
+        price = float(df["Close"].iloc[-1])
+        if held and held.get("qty", 0) > 0:
+            pb = build_playbook(df, account=equity, risk_pct=risk_pct,
+                                in_position=True,
+                                entry=float(held["avg_price"]),
+                                stop=float(held.get(
+                                    "stop", held["avg_price"] * 0.94)))
+            sig = "SELL" if any(k in pb["instruction"]
+                                for k in ("EXIT", "TIGHTEN")) else "NONE"
+            out = {"symbol": symbol, "signal": sig, "price": price,
+                   "urgency": pb["urgency"], "mode": "MANAGE",
+                   "gates": f"{pb['greens']}/5",
+                   "why": f"PLAYBOOK {pb['urgency']}: {pb['instruction']}"}
         else:
-            why.append(f"regime blocks longs (px < 200SMA)")
-        if r2 > 80:
-            sig, why = "SELL", [f"RSI2 stretched ({r2:.0f}>80) — take profit"]
-        out = {"symbol": symbol, "signal": sig, "price": price,
-               "rsi2": round(r2, 1), "atr": round(a, 3),
-               "why": " · ".join(why)}
+            pb = build_playbook(df, account=equity, risk_pct=risk_pct)
+            sig = "BUY" if pb["urgency"] in ("🟢 ACTIONABLE",
+                                             "🟡 FAST SETUP") else "NONE"
+            out = {"symbol": symbol, "signal": sig, "price": price,
+                   "urgency": pb["urgency"], "mode": "ENTRY",
+                   "gates": f"{pb['greens']}/5",
+                   "shares": pb.get("plan", {}).get("shares", 0),
+                   "why": f"PLAYBOOK {pb['urgency']}: {pb['instruction']}"}
         self._state.set(f"signals.{symbol}", out, source="orchestrator")
+        return out
+
+    def correlation_watch(self, prices: dict) -> dict:
+        """The correlation engine on the LIVE book — QuantSignal's
+        risk math guarding QuantTrader's positions every cycle."""
+        pos = self._broker.positions
+        if len(pos) < 2:
+            return {}
+        eq = self._broker.equity(prices)
+        plist, rets = [], {}
+        for t, p in pos.items():
+            df = self._provider.get_candles(t)
+            if len(df) < 60:
+                continue
+            rets[t] = df["Close"].pct_change().dropna()
+            plist.append({"ticker": t, "shares": int(p["qty"]),
+                          "entry": float(p["avg_price"]),
+                          "stop": float(p["avg_price"]) * 0.94})
+        ch = correlation_heat(plist, rets, eq) or {}
+        pv = portfolio_var(plist, rets, eq) or {}
+        out = {**ch, **{f"var_{k}": v for k, v in pv.items()}}
+        if out:
+            self._state.set("risk.book", out, source="risk")
+            warn = ch.get("warning")
+            self._audit.record(
+                "Research", "CORRELATION WATCH",
+                model="corr-adjusted heat + parametric VaR",
+                reasoning=(f"avg pairwise corr {ch.get('avg_correlation')}"
+                           f" · heat ${ch.get('naive_heat_$')}→"
+                           f"${ch.get('corr_adj_heat_$')} · 1-day VaR "
+                           f"{pv.get('VaR_%','—')}%"
+                           + (" · ⚠️ CROWDED BOOK — positions are "
+                              "effectively one trade" if warn else "")),
+                data=out)
         return out
 
     def research(self, symbol: str) -> dict:
@@ -177,13 +216,18 @@ class RuleOrchestrator:
     def step(self, symbols: list[str], risk_pct: float = 1.0) -> list[dict]:
         """One decision cycle over the watchlist. Returns executed fills."""
         fills = []
+        prices_seen = {}
         for s in symbols:
-            sig = self.analyze(s)
+            held_pos = self._broker.positions.get(s)
+            eq0 = self._broker.equity(prices_seen)
+            sig = self.analyze(s, equity=eq0, risk_pct=risk_pct,
+                               held=held_pos)
             price = sig.get("price", 0)
-            held = self._broker.positions.get(s, {}).get("qty", 0)
+            if price:
+                prices_seen[s] = price
+            held = held_pos.get("qty", 0) if held_pos else 0
             if sig["signal"] == "BUY" and not held and price > 0:
-                eq = self._broker.equity({s: price})
-                qty = int((eq * risk_pct / 100) / max(1.5 * sig["atr"], 0.01))
+                qty = int(sig.get("shares") or 0)
                 if qty < 1:
                     continue
                 order = Order(s, "BUY", qty, reason=sig["why"])
@@ -206,6 +250,7 @@ class RuleOrchestrator:
                     f = self._broker.execute(order, price)
                     if f:
                         fills.append(f)
+        self.correlation_watch(prices_seen)
         return fills
 
 

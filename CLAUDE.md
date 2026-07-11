@@ -25,7 +25,7 @@ A fresh, enterprise-grade quant platform. Event-driven engine (core/), pluggable
 9. Honesty in UI copy: no promised returns; paper results labeled paper.
 
 ## ROADMAP (build in order; owner picks pace)
-1. Port QuantSignal's proven engines (github.com/siibi123/quantsignal → quant/): composite signals, B-Xtrender, backtest v2 (blend), playbook, validation lab — as strategy plugins behind RuleOrchestrator.
+1. DONE (v0.3): QuantSignal engines live in quant/ (signals, bxtrender, backtest v2, verdict, playbook, scanner, risk, validation, montecarlo, levels, advanced). Playbook+verdict drive the policy; correlation_heat+VaR guard the book each cycle. NEXT: wire scanner.scan_setups as a universe pre-filter and validation lab as the promotion gate.
 2. NewsIngestionEngine: Finnhub free key (NEWS_API_KEY) → headlines→ticker/sentiment→state.news + interrupt events; stub cleanly if no key.
 3. Options module via LSE (chains WITH greeks, flow) once endpoints verified; 3D IV surface + flow heatmap (Plotly) in UI.
 4. LLMOrchestrator implementation when ANTHROPIC_API_KEY exists: messages+tools loop over TOOL_SCHEMAS, state.to_ai_context() as system context, every tool call risk-reviewed. Narrate-only mode first; propose-mode second.

@@ -303,6 +303,17 @@ with t_trades:
                          hide_index=True)
         else:
             st.caption("Flat.")
+    bk = state.get("risk.book") or {}
+    if bk:
+        warn = bk.get("warning")
+        st.markdown(f"<div class='qt-panel'>🕸️ <b>Correlation watch</b> · "
+                    f"avg pairwise {bk.get('avg_correlation','—')} · heat "
+                    f"${bk.get('naive_heat_$','—')}→"
+                    f"${bk.get('corr_adj_heat_$','—')} · VaR "
+                    f"{bk.get('var_VaR_%','—')}%"
+                    + (" · <span style='color:#ef4444'>⚠️ CROWDED — "
+                       "effectively one trade</span>" if warn else "")
+                    + "</div>", unsafe_allow_html=True)
     with c2:
         st.markdown("### Fills")
         if broker.fills:
@@ -332,5 +343,5 @@ with t_audit:
     else:
         st.caption("Nothing yet — run a decision cycle.")
 
-st.caption("QuantTrader v0.2 · LSE vault contract verified from official "
+st.caption("QuantTrader v0.3 FUSION · QuantSignal brain inside · LSE vault contract verified from official "
            "SDK · paper-only by constitution · keys via Secrets/.env only")
