@@ -11,7 +11,7 @@ A fresh, enterprise-grade quant platform. Event-driven engine (core/), pluggable
 - core/engine.py — AuditLog (JSONL, reasoning attached to every action), RiskEngine (ABSOLUTE veto: position/gross/daily-loss/VaR caps), PaperBroker (refuses unapproved orders; slippage+fees; persisted)
 - data/providers.py — DataProvider ABC; LSEProvider (probe-then-lock endpoints — their docs are JS-rendered, NEVER hardcode guessed URLs); YahooProvider fallback; FakeProvider for tests; CompositeProvider chain; PollingFeed (background thread → tick events)
 - ai/orchestrator.py — TOOL_SCHEMAS (the ONLY machine surface the AI may use); RuleOrchestrator v1 (deterministic, reasoning strings, risk-reviewed); LLMOrchestrator socket (refuses without ANTHROPIC_API_KEY — no fake AI, ever)
-- tests/test_core.py — run `python3 tests/test_core.py` before EVERY commit; extend it with every new module
+- tests/test_core.py — run `python3 tests/test_core.py` before EVERY commit; extend it with every new module (currently 28 checks)
 
 ## IRON RULES
 1. PAPER ONLY. No real broker execution without an explicit, separate, owner-confirmed phase.
@@ -19,7 +19,7 @@ A fresh, enterprise-grade quant platform. Event-driven engine (core/), pluggable
 3. Every action gets an AuditLog record with reasoning. If it isn't audited, it didn't happen.
 4. No fake AI: LLMOrchestrator only runs with a real key; suggestions must trace to computed numbers.
 5. Secrets via .env/os.getenv only. Never commit .env. Never print keys.
-6. LSE endpoints must be VERIFIED (probe or a curl example from their docs pasted by owner) before relying on them; Yahoo fallback stays forever.
+6. LSE contract is VERIFIED from their official SDK (github.com/londonstrategicedge/lse-data v0.14.0): REST GET {vault}/candles with x-api-key header + custom User-Agent (their CDN blocks default python UA); /options/chain carries precomputed greeks. Yahoo fallback stays forever.
 7. Tests before commit; small commits; tell the owner what to check after each push; never break main.
 8. 1GB-class hosting: no torch/GPU deps; cache aggressively; every network call fails gracefully.
 9. Honesty in UI copy: no promised returns; paper results labeled paper.
@@ -29,4 +29,4 @@ A fresh, enterprise-grade quant platform. Event-driven engine (core/), pluggable
 2. NewsIngestionEngine: Finnhub free key (NEWS_API_KEY) → headlines→ticker/sentiment→state.news + interrupt events; stub cleanly if no key.
 3. Options module via LSE (chains WITH greeks, flow) once endpoints verified; 3D IV surface + flow heatmap (Plotly) in UI.
 4. LLMOrchestrator implementation when ANTHROPIC_API_KEY exists: messages+tools loop over TOOL_SCHEMAS, state.to_ai_context() as system context, every tool call risk-reviewed. Narrate-only mode first; propose-mode second.
-5. Scheduler for autonomous cycles (in-process while awake; VPS systemd later). 6. Hetzner deploy guide + systemd unit. 7. WebSocket StreamingFeed ONLY if LSE docs confirm WS exists.
+5. Scheduler for autonomous cycles (in-process while awake; VPS systemd later). 6. Hetzner deploy guide + systemd unit. 7. WebSocket StreamingFeed: URI verified to exist (wss://data-ws.londonstrategicedge.com, parked as LSEProvider.WS_URL_ROADMAP). Build ONLY with owner sign-off after polling proves stable on the hosting; PollingFeed remains primary.

@@ -25,23 +25,42 @@ except Exception:                                    # dotenv optional
     pass
 
 
+def _env(name: str, default: str = "") -> str:
+    """os.getenv first (local .env / VPS), st.secrets second (Streamlit
+    Cloud). Never raises when Streamlit or the secret is absent."""
+    v = os.getenv(name)
+    if v:
+        return v
+    try:
+        import streamlit as _st
+        return str(_st.secrets.get(name, default))
+    except Exception:
+        return default
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class Config:
-    lse_api_key: str = os.getenv("LSE_API_KEY", "")
-    lse_base_url: str = os.getenv("LSE_BASE_URL", "")
-    news_api_key: str = os.getenv("NEWS_API_KEY", "")
-    anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
-    starting_cash: float = float(os.getenv("STARTING_CASH", "10000"))
-    max_position_pct: float = float(os.getenv("RISK_MAX_POSITION_PCT", "25"))
-    max_gross_exposure_pct: float = float(
-        os.getenv("RISK_MAX_GROSS_EXPOSURE_PCT", "120"))
-    max_daily_loss_pct: float = float(os.getenv("RISK_MAX_DAILY_LOSS_PCT", "3"))
-    max_var_pct: float = float(os.getenv("RISK_MAX_VAR_PCT", "2.5"))
-    runtime_dir: str = os.getenv("RUNTIME_DIR", "runtime")
+    lse_api_key: str = field(default_factory=lambda: _env("LSE_API_KEY"))
+    lse_base_url: str = field(default_factory=lambda: _env("LSE_BASE_URL"))
+    news_api_key: str = field(default_factory=lambda: _env("NEWS_API_KEY"))
+    anthropic_api_key: str = field(
+        default_factory=lambda: _env("ANTHROPIC_API_KEY"))
+    starting_cash: float = field(
+        default_factory=lambda: float(_env("STARTING_CASH", "10000")))
+    max_position_pct: float = field(
+        default_factory=lambda: float(_env("RISK_MAX_POSITION_PCT", "25")))
+    max_gross_exposure_pct: float = field(default_factory=lambda: float(
+        _env("RISK_MAX_GROSS_EXPOSURE_PCT", "120")))
+    max_daily_loss_pct: float = field(
+        default_factory=lambda: float(_env("RISK_MAX_DAILY_LOSS_PCT", "3")))
+    max_var_pct: float = field(
+        default_factory=lambda: float(_env("RISK_MAX_VAR_PCT", "2.5")))
+    runtime_dir: str = field(default_factory=lambda: _env("RUNTIME_DIR",
+                                                          "runtime"))
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +152,7 @@ class GlobalState:
 
     # ---- the AI's senses --------------------------------------------------
     AI_KEYS = ["session", "feed", "quotes", "portfolio", "risk",
-               "signals", "news", "ui"]
+               "signals", "research", "options", "news", "ui"]
 
     def to_ai_context(self, max_chars: int = 6000) -> str:
         """Curated, compact JSON of everything the AI needs to be

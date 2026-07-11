@@ -66,120 +66,93 @@ class YahooProvider(DataProvider):
 
 
 class LSEProvider(DataProvider):
-    """London Strategic Edge — free-key API. Endpoint pattern is DISCOVERED
-    via probe (their docs are JS-rendered), then locked. Never guesses in
-    production: unconfigured/unprobed -> empty results -> chain falls back.
+    """London Strategic Edge — VERIFIED contract (extracted from their
+    official SDK, github.com/londonstrategicedge/lse-data v0.14.0):
+
+      GET https://api.londonstrategicedge.com/vault/candles
+          ?symbol=AAPL&timeframe=1d&limit=5000&order=asc[&start=&end=]
+      headers: x-api-key: <key>, User-Agent: <custom>  (their CDN blocks
+      the default Python UA — requests' UA is fine, we set ours anyway)
+
+      Rows: {ts|timestamp, open, high, low, close, volume?} — bar-open time.
+      Timeframes: 1s 5s 15s 30s 1m 3m 5m 15m 30m 1h 4h 1d 1w 1mo.
+      Options chain w/ greeks: GET /vault/options/chain?underlying=...
+      WebSocket (verified to exist): wss://data-ws.londonstrategicedge.com
     """
     name = "lse"
-    CANDLE_PATTERNS = [
-        "{base}/candles?symbol={sym}&resolution={res}&api_key={key}",
-        "{base}/candles/{sym}?resolution={res}&api_key={key}",
-        "{base}/v1/candles?symbol={sym}&resolution={res}&api_key={key}",
-        "{base}/history?symbol={sym}&resolution={res}&api_key={key}",
-    ]
-    HEADER_STYLES = [{}, {"Authorization": "Bearer {key}"},
-                     {"X-API-Key": "{key}"}]
+    VAULT = "https://api.londonstrategicedge.com/vault"
+    # Verified to exist in their SDK; NOT used yet — polling stays primary
+    # until a StreamingFeed phase (CLAUDE.md roadmap #7) proves lifecycle
+    # safety on our hosting. Do not wire without owner sign-off.
+    WS_URL_ROADMAP = "wss://data-ws.londonstrategicedge.com"
+    UA = "quanttrader (+https://github.com/siibi123/quanttrader)"
+    TF_MAP = {"1h": "1h", "1d": "1d", "1wk": "1w", "1w": "1w",
+              "1mo": "1mo", "1m": "1m", "5m": "5m", "15m": "15m",
+              "4h": "4h"}
 
     def __init__(self, api_key: str, base_url: str = ""):
         self.key = api_key
-        self.bases = ([base_url] if base_url else []) + [
-            "https://api.londonstrategicedge.com",
-            "https://londonstrategicedge.com/api",
-        ]
-        self.working: dict | None = None
+        self.base = (base_url or self.VAULT).rstrip("/")
+        self.working = bool(api_key)      # verified contract; key = enabled
 
-    def probe(self, symbol="AAPL") -> list[dict]:
-        results = []
-        for base in self.bases:
-            for pat in self.CANDLE_PATTERNS:
-                for hs in self.HEADER_STYLES:
-                    url = pat.format(base=base.rstrip("/"), sym=symbol,
-                                     res="1d",
-                                     key=self.key if not hs else "")
-                    h = {k: v.format(key=self.key) for k, v in hs.items()}
-                    try:
-                        r = requests.get(url, headers=h, timeout=8)
-                        ok = r.status_code == 200
-                    except Exception:
-                        ok, r = False, None
-                    results.append({"url": url.replace(self.key, "***"),
-                                    "ok": ok,
-                                    "status": r.status_code if r else None})
-                    if ok:
-                        self.working = {"pattern": pat, "base": base,
-                                        "headers": hs}
-                        return results
-        return results
+    def _get(self, path: str, params: dict) -> list | dict | None:
+        if not self.key:
+            return None
+        try:
+            r = requests.get(f"{self.base}{path}",
+                             params={k: v for k, v in params.items()
+                                     if v is not None},
+                             headers={"x-api-key": self.key,
+                                      "User-Agent": self.UA},
+                             timeout=30)
+            return r.json() if r.status_code == 200 else None
+        except Exception:
+            return None
 
-    @staticmethod
-    def _normalize(j) -> pd.DataFrame:
-        rows = None
-        if isinstance(j, dict):
-            if all(k in j for k in ("t", "o", "h", "l", "c")):
-                df = pd.DataFrame({"Open": j["o"], "High": j["h"],
-                                   "Low": j["l"], "Close": j["c"],
-                                   "Volume": j.get("v", [0]*len(j["t"]))})
-                ts = pd.Series(j["t"])
-                idx = pd.to_datetime(ts, unit="s", errors="coerce") \
-                    if pd.api.types.is_numeric_dtype(ts) and ts.max() > 1e9 \
-                    else pd.to_datetime(ts, errors="coerce")
-                df.index = pd.DatetimeIndex(idx).tz_localize(None)
-                return df.astype(float).dropna().sort_index()
-            for k in ("candles", "data", "results", "bars"):
-                if isinstance(j.get(k), list):
-                    rows = j[k]
-                    break
-        elif isinstance(j, list):
-            rows = j
-        if not rows:
+    def get_candles(self, symbol, interval="1d", lookback="2y"):
+        tf = self.TF_MAP.get(interval, "1d")
+        rows = self._get("/candles", {"symbol": symbol, "timeframe": tf,
+                                      "limit": 5000, "order": "desc"})
+        if not isinstance(rows, list) or not rows:
             return pd.DataFrame()
         df = pd.DataFrame(rows)
-        cmap = {}
-        for want, alts in {"Open": ("open", "o"), "High": ("high", "h"),
-                           "Low": ("low", "l"), "Close": ("close", "c"),
-                           "Volume": ("volume", "v")}.items():
-            for a in alts:
-                if a in df.columns:
-                    cmap[a] = want
-                    break
-        tcol = next((c for c in ("time", "t", "ts", "timestamp", "date")
-                     if c in df.columns), None)
-        if not tcol or len(cmap) < 4:
+        tcol = "timestamp" if "timestamp" in df.columns else             ("ts" if "ts" in df.columns else None)
+        need = {"open", "high", "low", "close"}
+        if not tcol or not need.issubset(df.columns):
             return pd.DataFrame()
-        df = df.rename(columns=cmap)
+        df["volume"] = df.get("volume", 0.0)
         ts = df[tcol]
         idx = pd.to_datetime(ts, unit="s", errors="coerce") \
-            if pd.api.types.is_numeric_dtype(ts) and ts.max() > 1e9 \
-            else pd.to_datetime(ts, errors="coerce")
+            if pd.api.types.is_numeric_dtype(ts) else \
+            pd.to_datetime(ts, errors="coerce")
         df.index = pd.DatetimeIndex(idx).tz_localize(None)
-        if "Volume" not in df:
-            df["Volume"] = 0.0
+        df = df.rename(columns={"open": "Open", "high": "High",
+                                "low": "Low", "close": "Close",
+                                "volume": "Volume"})
         return df[["Open", "High", "Low", "Close",
                    "Volume"]].astype(float).dropna().sort_index()
 
-    def get_candles(self, symbol, interval="1d", lookback="2y"):
-        if not self.working or not self.key:
-            return pd.DataFrame()
-        w = self.working
-        url = w["pattern"].format(base=w["base"].rstrip("/"), sym=symbol,
-                                  res=interval,
-                                  key=self.key if not w["headers"] else "")
-        h = {k: v.format(key=self.key) for k, v in w["headers"].items()}
-        try:
-            r = requests.get(url, headers=h, timeout=12)
-            return self._normalize(r.json()) if r.status_code == 200 \
-                else pd.DataFrame()
-        except Exception:
-            return pd.DataFrame()
-
     def get_quote(self, symbol):
-        df = self.get_candles(symbol, "1d")
+        df = self.get_candles(symbol, "1m")
+        if df.empty:
+            df = self.get_candles(symbol, "1d")
         if df.empty:
             return {}
         px = float(df["Close"].iloc[-1])
         prev = float(df["Close"].iloc[-2]) if len(df) > 1 else px
         return {"symbol": symbol, "price": px,
                 "chg_pct": round((px / prev - 1) * 100, 2)}
+
+    def options_chain(self, underlying: str, max_dte: int | None = 45
+                      ) -> pd.DataFrame:
+        """Current chain, one row per contract, WITH iv and greeks."""
+        rows = self._get("/options/chain",
+                         {"underlying": underlying, "limit": 5000,
+                          "max_dte": max_dte})
+        return pd.DataFrame(rows) if isinstance(rows, list) else pd.DataFrame()
+
+    def usage(self) -> dict:
+        return self._get("/usage", {}) or {}
 
 
 class FakeProvider(DataProvider):

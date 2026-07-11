@@ -112,6 +112,68 @@ class RuleOrchestrator:
         self._state.set(f"signals.{symbol}", out, source="orchestrator")
         return out
 
+    def research(self, symbol: str) -> dict:
+        """Autonomous quant pass: EWMA vol + Monte Carlo odds -> state+audit."""
+        df = self._provider.get_candles(symbol)
+        if len(df) < 60:
+            return {}
+        r = df["Close"].pct_change().dropna()
+        lam, var = 0.94, float(r.iloc[0]) ** 2
+        for x in r.iloc[1:].values:
+            var = lam * var + (1 - lam) * x * x
+        sig_d = float(np.sqrt(var))
+        rng = np.random.default_rng(7)
+        paths = np.exp(np.cumsum(
+            rng.normal(float(r.mean()), sig_d, (2000, 20)), axis=1))
+        out = {"symbol": symbol,
+               "ewma_ann_vol_pct": round(sig_d * np.sqrt(252) * 100, 1),
+               "p_up_20d_pct": round(float((paths[:, -1] > 1).mean()) * 100, 1),
+               "exp_move_20d": round(
+                   float(df["Close"].iloc[-1]) * sig_d * np.sqrt(20), 2)}
+        self._state.set(f"research.{symbol}", out, source="research")
+        self._audit.record(
+            "Research", "VOL+MONTECARLO", trigger=symbol,
+            model="EWMA(l=.94) + GBM-MC(2000x20d)",
+            reasoning=f"{symbol}: ann vol {out['ewma_ann_vol_pct']}% · "
+                      f"P(up in 20d) {out['p_up_20d_pct']}% · expected "
+                      f"1s move +/-${out['exp_move_20d']}",
+            data=out)
+        return out
+
+    def ingest_chain(self, symbol: str, chain: pd.DataFrame) -> dict:
+        """Distill an options chain WITH greeks into the Global State."""
+        if chain is None or not len(chain):
+            return {}
+        c = chain.copy()
+        c.columns = [str(x).lower() for x in c.columns]
+        g = {}
+        for k in ("delta", "gamma", "theta", "vega", "iv"):
+            if k in c.columns:
+                g[k] = pd.to_numeric(c[k], errors="coerce")
+        out = {"symbol": symbol, "contracts": int(len(c)),
+               "greeks_present": sorted(g.keys())}
+        if "iv" in g:
+            out["median_iv"] = round(float(g["iv"].median()), 4)
+        if "type" in c.columns:
+            t = c["type"].astype(str).str.lower()
+            out["call_share_pct"] = round(
+                float((t.str.startswith("c")).mean()) * 100, 1)
+        if "gamma" in g and "strike" in c.columns:
+            gx = g["gamma"].abs().groupby(
+                pd.to_numeric(c["strike"], errors="coerce")).sum()
+            if len(gx):
+                out["max_gamma_strike"] = float(gx.idxmax())
+        self._state.set(f"options.{symbol}", out, source="research")
+        self._audit.record(
+            "Research", "OPTIONS CHAIN", trigger=symbol,
+            model="LSE /options/chain (precomputed greeks)",
+            reasoning=f"{symbol}: {out['contracts']} contracts · greeks "
+                      f"{','.join(out['greeks_present']) or 'none'} · "
+                      f"median IV {out.get('median_iv', 'n/a')} · max-gamma "
+                      f"strike {out.get('max_gamma_strike', 'n/a')}",
+            data=out)
+        return out
+
     def step(self, symbols: list[str], risk_pct: float = 1.0) -> list[dict]:
         """One decision cycle over the watchlist. Returns executed fills."""
         fills = []
