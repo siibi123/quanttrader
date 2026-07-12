@@ -6,12 +6,12 @@ Yahav — Israeli retail trader, NON-CODER. You build/test/commit/push; explain 
 ## What this is
 A fresh, enterprise-grade quant platform. Event-driven engine (core/), pluggable data (data/), AI-ready orchestration (ai/), thin Streamlit shell (app.py). Deployed later to Streamlit Cloud and eventually a VPS; engine must always run headless.
 
-## Architecture (v0.4 — 29/29 core tests passing)
+## Architecture (v0.4 — 37/37 core tests passing)
 - core/state.py — Config (.env only), EventBus (thread-safe pub/sub), GlobalState (dot-path store; to_ai_context() exports curated snapshot for the AI)
 - core/engine.py — AuditLog (JSONL, reasoning attached to every action), RiskEngine (ABSOLUTE veto: position/gross/daily-loss/VaR caps), PaperBroker (refuses unapproved orders; slippage+fees; persisted)
 - data/providers.py — DataProvider ABC; LSEProvider (probe-then-lock endpoints — their docs are JS-rendered, NEVER hardcode guessed URLs); YahooProvider fallback; FakeProvider for tests; CompositeProvider chain; PollingFeed (background thread → tick events)
 - ai/orchestrator.py — TOOL_SCHEMAS (the ONLY machine surface the AI may use); RuleOrchestrator v1 (deterministic, reasoning strings, risk-reviewed); LLMOrchestrator socket (refuses without ANTHROPIC_API_KEY — no fake AI, ever)
-- tests/test_core.py — run `python tests/test_core.py` before EVERY commit; extend it with every new module (currently 29 checks). NOTE: on this machine `python3` resolves to the Windows Store stub and hangs — use `python`.
+- tests/test_core.py — run `python tests/test_core.py` before EVERY commit; extend it with every new module (currently 37 checks). NOTE: on this machine `python3` resolves to the Windows Store stub and hangs — use `python`.
 
 ## IRON RULES
 1. PAPER ONLY. No real broker execution without an explicit, separate, owner-confirmed phase.
@@ -27,12 +27,9 @@ A fresh, enterprise-grade quant platform. Event-driven engine (core/), pluggable
 ## ROADMAP (build in order; owner picks pace)
 DONE (v0.3): QuantSignal engines live in quant/ (signals, bxtrender, backtest v2, verdict, playbook, scanner, risk, validation, montecarlo, levels, advanced). Playbook+verdict drive the policy; correlation_heat+VaR guard the book each cycle.
 
-P1 — Fixes & portfolio controls (IN PROGRESS):
-(a) DONE: LSEProvider.get_quote now compares live price to the previous DAILY close, not the previous 1-minute bar.
-(b) DONE: sidebar AUM (Total Portfolio Capital) + Max Position Size (fixed $ or % of AUM) inputs, written into a per-cycle Config via dataclasses.replace on RiskEngine.cfg, enforced as a new veto check.
-(c) DONE: per-position "% of AUM" column in the Open Book view (TRADES tab).
+P1 — DONE (pushed): LSEProvider.get_quote now compares live price to the previous DAILY close, not the previous 1-minute bar. Sidebar AUM (Total Portfolio Capital) + Max Position Size (fixed $ or % of AUM) inputs, written into a per-cycle Config via dataclasses.replace on RiskEngine.cfg, enforced as a new veto check. Per-position "% of AUM" column in the Open Book view (TRADES tab).
 
-P2 — Hedge-fund math in quant/: hmm_regime.py (Gaussian HMM 2-3 states), kalman_pairs.py (Kalman dynamic hedge ratio + spread z-score), GARCH(1,1) via `arch` (ask before adding the dependency), Ledoit-Wolf shrinkage portfolio optimizer. Pure functions, 2 tests each.
+P2 — DONE (pushed): quant/hmm_regime.py (hand-rolled Gaussian HMM, Baum-Welch EM, no new dep), quant/kalman_pairs.py (hand-rolled Kalman dynamic hedge ratio + spread z-score, no new dep), quant/garch.py (GARCH(1,1) via the `arch` package — owner approved), quant/covariance.py (Ledoit-Wolf shrinkage + min-variance weights via scikit-learn — owner approved; hand-rolling the shrinkage-intensity formula was judged too risky to get right from memory). All four are standalone pure functions, not yet wired into the UI/state/orchestrator — that happens as later phases consume them (P5 sector engine is the likely first consumer). requirements.txt now includes arch>=6.3 and scikit-learn>=1.3.
 
 P3 — 3D volatility surface: Plotly Surface (strike x DTE x IV) from LSE /options/chain; surface_interpreter.py — rule-based plain-text readout (skew steepness, term-structure inversion, smile anomalies) feeding audit trail + AI context. No LLM calls, deterministic rules only.
 

@@ -4,12 +4,17 @@ import os, sys, time, shutil
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 shutil.rmtree("runtime", ignore_errors=True)
 
+import numpy as np
 import pandas as pd
 
 from core.state import Config, Event, EventBus, GlobalState
 from core.engine import AuditLog, Order, PaperBroker, RiskEngine
 from data.providers import CompositeProvider, FakeProvider, LSEProvider, PollingFeed
 from ai.orchestrator import LLMOrchestrator, RuleOrchestrator
+from quant.hmm_regime import fit_hmm
+from quant.kalman_pairs import kalman_hedge_ratio, pair_signal
+from quant.garch import garch_forecast
+from quant.covariance import shrunk_covariance, min_variance_weights
 
 results = []
 def check(name, cond):
@@ -152,6 +157,67 @@ check("risk: AUM-based %% cap uses declared AUM, not live equity",
 aum_ok = risk2.review(Order("MSFT", "BUY", 1, reason="test aum pct cap ok"),
                       broker2, 50.0)     # notional $50 <= $100 cap
 check("risk: AUM-based %% cap approves order within cap", aum_ok.approved)
+
+# ---- 12. P2: hmm_regime — Gaussian HMM regime detection
+_rng = np.random.default_rng(3)
+_bull = _rng.normal(0.0015, 0.006, 200)
+_bear = _rng.normal(-0.003, 0.02, 200)
+_hmm_r = pd.Series(np.concatenate([_bull, _bear]),
+                   index=pd.bdate_range("2023-01-01", periods=400))
+_hmm = fit_hmm(_hmm_r, n_states=2)
+check("hmm: states sorted by mean, current regime matches the bear tail",
+      _hmm["state_means_pct"][0] < _hmm["state_means_pct"][1]
+      and _hmm["most_likely_regime"] == "Bear/Panic")
+check("hmm: transition matrix is diagonal-dominant (regimes persist)",
+      all(_hmm["transition_matrix"][i][i] > 0.9 for i in range(2)))
+
+# ---- 13. P2: kalman_pairs — dynamic hedge ratio + spread z-score
+_rng2 = np.random.default_rng(5)
+_n = 300
+_x = np.cumsum(_rng2.normal(0.1, 1, _n)) + 100
+_y = 2.0 * _x + _rng2.normal(0, 0.3, _n)
+_idx = pd.bdate_range("2023-01-01", periods=_n)
+_xs, _ys = pd.Series(_x, index=_idx), pd.Series(_y, index=_idx)
+_kf = kalman_hedge_ratio(_ys, _xs)
+check("kalman: recovers the true hedge ratio (beta ~= 2.0)",
+      abs(float(_kf["beta"].iloc[-1]) - 2.0) < 0.2)
+_y_shock = _y.copy()
+_y_shock[-1] += 20                                    # one isolated spread shock
+_sig = pair_signal(pd.Series(_y_shock, index=_idx), _xs)
+check("kalman: isolated spread shock triggers a SHORT SPREAD signal",
+      _sig["signal"] == "SHORT SPREAD" and _sig["spread_z"] > 5)
+
+# ---- 14. P2: garch — GARCH(1,1) volatility forecast (arch package)
+_rng3 = np.random.default_rng(11)
+_ng, _omega, _a1, _b1 = 800, 0.02, 0.1, 0.85
+_eps, _sig2 = np.zeros(_ng), np.zeros(_ng)
+_sig2[0] = _omega / (1 - _a1 - _b1)
+_z = _rng3.standard_normal(_ng)
+_eps[0] = np.sqrt(_sig2[0]) * _z[0]
+for _t in range(1, _ng):
+    _sig2[_t] = _omega + _a1 * _eps[_t - 1] ** 2 + _b1 * _sig2[_t - 1]
+    _eps[_t] = np.sqrt(_sig2[_t]) * _z[_t]
+_close = pd.Series(100 * np.exp(np.cumsum(_eps / 100)),
+                   index=pd.bdate_range("2022-01-01", periods=_ng))
+_gf = garch_forecast(_close)
+check("garch: fits a simulated GARCH(1,1) series without error",
+      "error" not in _gf and _gf["vol_1d_pct"] > 0)
+check("garch: recovers a stationary, sensible persistence estimate",
+      _gf["persistence"] is not None and 0 < _gf["persistence"] < 1
+      and _gf["half_life_days"] is not None)
+
+# ---- 15. P2: covariance — Ledoit-Wolf shrinkage + min-variance weights
+_rng4 = np.random.default_rng(2)
+_cov_r = pd.DataFrame(
+    {"LOWVOL": _rng4.normal(0, 0.005, 300), "HIGHVOL": _rng4.normal(0, 0.02, 300)},
+    index=pd.bdate_range("2023-01-01", periods=300))
+_sc = shrunk_covariance(_cov_r)
+check("covariance: Ledoit-Wolf shrinkage intensity is a valid fraction",
+      "error" not in _sc and 0 <= _sc["shrinkage"] <= 1)
+_mv = min_variance_weights(_cov_r)
+check("covariance: min-variance portfolio tilts toward the lower-vol asset",
+      abs(sum(_mv["weights"].values()) - 1) < 0.01
+      and _mv["weights"]["LOWVOL"] > _mv["weights"]["HIGHVOL"])
 
 print("\n" + "=" * 44)
 passed = sum(1 for _, ok in results if ok)

@@ -1,8 +1,10 @@
 streamlit>=1.38
-   yfinance>=0.2.50
-   pandas>=2.0
-   numpy>=1.26
-   plotly>=5.20
-   scipy>=1.11
-   requests>=2.31
-   python-dotenv>=1.0
+yfinance>=0.2.50
+pandas>=2.0
+numpy>=1.26
+plotly>=5.20
+scipy>=1.11
+requests>=2.31
+python-dotenv>=1.0
+arch>=6.3
+scikit-learn>=1.3
