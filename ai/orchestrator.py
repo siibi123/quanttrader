@@ -24,6 +24,7 @@ from core.state import EventBus, GlobalState
 from data.providers import DataProvider
 from quant.playbook import build_playbook
 from quant.risk import correlation_heat, portfolio_var
+from quant.surface_interpreter import interpret_surface
 from quant.verdict import analyze as qs_verdict
 
 TOOL_SCHEMAS = [
@@ -202,6 +203,12 @@ class RuleOrchestrator:
                 pd.to_numeric(c["strike"], errors="coerce")).sum()
             if len(gx):
                 out["max_gamma_strike"] = float(gx.idxmax())
+
+        spot = (self._state.get(f"quotes.{symbol}") or {}).get("price")
+        surf = interpret_surface(chain, spot=spot)
+        if "error" not in surf:
+            out["surface"] = surf
+
         self._state.set(f"options.{symbol}", out, source="research")
         self._audit.record(
             "Research", "OPTIONS CHAIN", trigger=symbol,
@@ -211,6 +218,13 @@ class RuleOrchestrator:
                       f"median IV {out.get('median_iv', 'n/a')} · max-gamma "
                       f"strike {out.get('max_gamma_strike', 'n/a')}",
             data=out)
+        if "error" not in surf and surf["findings"]:
+            self._audit.record(
+                "Research", "VOL SURFACE", trigger=symbol,
+                model="surface_interpreter (rule-based, deterministic)",
+                reasoning=f"{symbol} @{surf['near_dte']}d: " +
+                          " ".join(surf["findings"]),
+                data=surf)
         return out
 
     def step(self, symbols: list[str], risk_pct: float = 1.0) -> list[dict]:

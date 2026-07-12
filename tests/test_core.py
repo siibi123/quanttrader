@@ -15,6 +15,8 @@ from quant.hmm_regime import fit_hmm
 from quant.kalman_pairs import kalman_hedge_ratio, pair_signal
 from quant.garch import garch_forecast
 from quant.covariance import shrunk_covariance, min_variance_weights
+from quant.vol_surface import build_surface_grid
+from quant.surface_interpreter import interpret_surface
 
 results = []
 def check(name, cond):
@@ -218,6 +220,54 @@ _mv = min_variance_weights(_cov_r)
 check("covariance: min-variance portfolio tilts toward the lower-vol asset",
       abs(sum(_mv["weights"].values()) - 1) < 0.01
       and _mv["weights"]["LOWVOL"] > _mv["weights"]["HIGHVOL"])
+
+# ---- 16. P3: vol_surface — strike x DTE x IV grid
+_spot = 100.0
+_chain_rows = []
+for _k in [80, 85, 90, 95, 100, 105, 110, 115, 120]:
+    _iv = 0.20 + max(0, (_spot - _k)) * 0.006          # steep put-side skew
+    _chain_rows.append({"strike": _k, "dte": 7, "iv": round(_iv, 4),
+                        "type": "C" if _k >= _spot else "P",
+                        "delta": (0.5 - (_k - _spot) / 100) if _k >= _spot
+                                else (-0.5 - (_k - _spot) / 100)})
+for _k in [80, 90, 100, 110, 120]:
+    _chain_rows.append({"strike": _k, "dte": 60, "iv": 0.16,
+                        "type": "C" if _k >= _spot else "P",
+                        "delta": (0.5 - (_k - _spot) / 100) if _k >= _spot
+                                else (-0.5 - (_k - _spot) / 100)})
+_chain = pd.DataFrame(_chain_rows)
+_grid = build_surface_grid(_chain)
+check("vol_surface: grid shape matches distinct DTEs x strikes",
+      _grid["dtes"] == [7, 60] and len(_grid["strikes"]) == 9
+      and len(_grid["iv_grid"]) == 2)
+check("vol_surface: missing iv/dte columns fails honestly, no fake grid",
+      "error" in build_surface_grid(pd.DataFrame({"strike": [100]})))
+
+# ---- 17. P3: surface_interpreter — skew + term structure + smile anomaly
+_surf = interpret_surface(_chain, spot=_spot)
+check("surface_interpreter: detects the steep put skew built into the data",
+      _surf["skew_pts"] is not None and _surf["skew_pts"] > 5
+      and any("Steep put skew" in f for f in _surf["findings"]))
+check("surface_interpreter: detects the term-structure inversion (7d rich vs 60d)",
+      _surf["term_structure_pts"] is not None and _surf["term_structure_pts"] > 3
+      and any("INVERTED" in f for f in _surf["findings"]))
+
+_smile_rows = [{"strike": k, "dte": 10,
+               "iv": 0.35 if k == 95 else 0.20,           # single-strike anomaly
+               "type": "C" if k >= 100 else "P"}
+              for k in [85, 90, 95, 100, 105, 110, 115]]
+_smile = interpret_surface(pd.DataFrame(_smile_rows), spot=100.0)
+check("surface_interpreter: flags a single-strike smile anomaly",
+      len(_smile["smile_anomalies"]) == 1
+      and _smile["smile_anomalies"][0]["strike"] == 95.0)
+
+# ---- 18. P3: ingest_chain wires the surface read into state + audit
+_orch3 = RuleOrchestrator(bus, state, audit, risk, broker, FakeProvider())
+_ing = _orch3.ingest_chain("SURF", _chain)
+check("ingest_chain: surface findings attached to the options state entry",
+      "surface" in _ing and len(_ing["surface"]["findings"]) >= 1)
+check("ingest_chain: VOL SURFACE audit record created",
+      any(r["action"] == "VOL SURFACE" for r in audit.tail(20)))
 
 print("\n" + "=" * 44)
 passed = sum(1 for _, ok in results if ok)

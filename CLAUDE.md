@@ -6,12 +6,12 @@ Yahav — Israeli retail trader, NON-CODER. You build/test/commit/push; explain 
 ## What this is
 A fresh, enterprise-grade quant platform. Event-driven engine (core/), pluggable data (data/), AI-ready orchestration (ai/), thin Streamlit shell (app.py). Deployed later to Streamlit Cloud and eventually a VPS; engine must always run headless.
 
-## Architecture (v0.4 — 37/37 core tests passing)
+## Architecture (v0.4 — 44/44 core tests passing)
 - core/state.py — Config (.env only), EventBus (thread-safe pub/sub), GlobalState (dot-path store; to_ai_context() exports curated snapshot for the AI)
 - core/engine.py — AuditLog (JSONL, reasoning attached to every action), RiskEngine (ABSOLUTE veto: position/gross/daily-loss/VaR caps), PaperBroker (refuses unapproved orders; slippage+fees; persisted)
 - data/providers.py — DataProvider ABC; LSEProvider (probe-then-lock endpoints — their docs are JS-rendered, NEVER hardcode guessed URLs); YahooProvider fallback; FakeProvider for tests; CompositeProvider chain; PollingFeed (background thread → tick events)
 - ai/orchestrator.py — TOOL_SCHEMAS (the ONLY machine surface the AI may use); RuleOrchestrator v1 (deterministic, reasoning strings, risk-reviewed); LLMOrchestrator socket (refuses without ANTHROPIC_API_KEY — no fake AI, ever)
-- tests/test_core.py — run `python tests/test_core.py` before EVERY commit; extend it with every new module (currently 37 checks). NOTE: on this machine `python3` resolves to the Windows Store stub and hangs — use `python`.
+- tests/test_core.py — run `python tests/test_core.py` before EVERY commit; extend it with every new module (currently 44 checks). NOTE: on this machine `python3` resolves to the Windows Store stub and hangs — use `python`.
 
 ## IRON RULES
 1. PAPER ONLY. No real broker execution without an explicit, separate, owner-confirmed phase.
@@ -31,7 +31,7 @@ P1 — DONE (pushed): LSEProvider.get_quote now compares live price to the previ
 
 P2 — DONE (pushed): quant/hmm_regime.py (hand-rolled Gaussian HMM, Baum-Welch EM, no new dep), quant/kalman_pairs.py (hand-rolled Kalman dynamic hedge ratio + spread z-score, no new dep), quant/garch.py (GARCH(1,1) via the `arch` package — owner approved), quant/covariance.py (Ledoit-Wolf shrinkage + min-variance weights via scikit-learn — owner approved; hand-rolling the shrinkage-intensity formula was judged too risky to get right from memory). All four are standalone pure functions, not yet wired into the UI/state/orchestrator — that happens as later phases consume them (P5 sector engine is the likely first consumer). requirements.txt now includes arch>=6.3 and scikit-learn>=1.3.
 
-P3 — 3D volatility surface: Plotly Surface (strike x DTE x IV) from LSE /options/chain; surface_interpreter.py — rule-based plain-text readout (skew steepness, term-structure inversion, smile anomalies) feeding audit trail + AI context. No LLM calls, deterministic rules only.
+P3 — DONE (pushed): quant/vol_surface.py (normalizes an options chain — tolerates a few strike/iv/dte-or-expiry column-naming conventions since the exact LSE shape isn't hardcoded-guessed — into a strike x DTE x IV grid) + Plotly Surface chart in the LAB tab ("Build vol surface" button, needs LSE_API_KEY). quant/surface_interpreter.py — rule-based, deterministic plain-text reads (skew in vol points via 25-delta or a strike proxy, term-structure inversion via near-vs-far ATM IV, single-strike smile anomalies vs a local rolling median). Wired into RuleOrchestrator.ingest_chain: findings land in state.options.{symbol}.surface, get their own "VOL SURFACE" audit record, and flow into AI context automatically (options is already a curated AI_KEYS key). No LLM calls anywhere in this phase.
 
 P4 — Intelligence feeds: Finnhub news/sentiment behind NEWS_API_KEY, clean stub with no key. LSE macro endpoints (rates, CPI) into state.macro. Curated anomaly library with academic citations injected into AI context. LSE options-flow spikes as institutional flow tracker. Never fake data that has no real source.
 

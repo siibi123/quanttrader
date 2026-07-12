@@ -365,6 +365,7 @@ with t_trades:
 with t_lab:
     from quant.sltp_opt import optimize_sltp
     from quant.var_lab import var_suite
+    from quant.vol_surface import build_surface_grid
     lc1, lc2 = st.columns(2)
     with lc1:
         st.markdown("### 🧮 VaR Lab")
@@ -408,6 +409,42 @@ with t_lab:
                              height=300)
             else:
                 st.info("Not enough BUY signals in history to optimize.")
+
+    st.markdown("### 🌋 Volatility Surface")
+    if not cfg.lse_api_key:
+        st.caption("Add LSE_API_KEY in Secrets/.env to build the vol surface "
+                   "— no chain data without it.")
+    elif st.button("Build vol surface", use_container_width=True):
+        with st.spinner("Fetching chain + building surface…"):
+            chain_ = E["lse"].options_chain(chart_sym)
+            ing = orch.ingest_chain(chart_sym, chain_)
+            grid = build_surface_grid(chain_)
+        if "error" in grid:
+            st.warning(grid["error"])
+        else:
+            fig2 = go.Figure(go.Surface(
+                x=grid["strikes"], y=grid["dtes"], z=grid["iv_grid"],
+                colorscale="Viridis"))
+            fig2.update_layout(
+                height=480, margin=dict(l=6, r=6, t=24, b=6),
+                scene=dict(xaxis_title="Strike", yaxis_title="DTE",
+                          zaxis_title="IV",
+                          xaxis=dict(gridcolor="#161618"),
+                          yaxis=dict(gridcolor="#161618"),
+                          zaxis=dict(gridcolor="#161618"),
+                          bgcolor="#0a0a0a"),
+                paper_bgcolor="#0a0a0a",
+                font=dict(color="#a1a1aa", family="IBM Plex Mono", size=11))
+            st.plotly_chart(fig2, use_container_width=True)
+            surf = ing.get("surface")
+            if surf and surf.get("findings"):
+                for f_ in surf["findings"]:
+                    st.markdown(f"<div class='qt-panel'>{f_}</div>",
+                               unsafe_allow_html=True)
+            else:
+                st.caption("Grid built, but the interpreter needs more "
+                           "expiries/strikes (or delta/type columns) for "
+                           "skew, term-structure or smile reads.")
 
 with t_audit:
     st.markdown("### Audit timeline — trigger → model → reasoning")
