@@ -61,6 +61,14 @@ class Config:
         default_factory=lambda: float(_env("RISK_MAX_VAR_PCT", "2.5")))
     runtime_dir: str = field(default_factory=lambda: _env("RUNTIME_DIR",
                                                           "runtime"))
+    # Owner-declared total capital (AUM) — 0 means "unset", fall back to the
+    # paper broker's own live equity. Lets the position-size cap below be
+    # sized against the owner's real account, not just the paper sandbox.
+    aum: float = field(default_factory=lambda: float(_env("PORTFOLIO_AUM", "0")))
+    max_position_mode: str = field(
+        default_factory=lambda: _env("RISK_MAX_POSITION_MODE", "pct"))  # "pct" | "fixed"
+    max_position_fixed_usd: float = field(
+        default_factory=lambda: float(_env("RISK_MAX_POSITION_FIXED_USD", "0")))
 
 
 # ---------------------------------------------------------------------------

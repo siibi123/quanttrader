@@ -133,13 +133,22 @@ class LSEProvider(DataProvider):
                    "Volume"]].astype(float).dropna().sort_index()
 
     def get_quote(self, symbol):
-        df = self.get_candles(symbol, "1m")
-        if df.empty:
-            df = self.get_candles(symbol, "1d")
-        if df.empty:
+        live = self.get_candles(symbol, "1m")
+        if live.empty:
+            live = self.get_candles(symbol, "1d")
+        if live.empty:
             return {}
-        px = float(df["Close"].iloc[-1])
-        prev = float(df["Close"].iloc[-2]) if len(df) > 1 else px
+        px = float(live["Close"].iloc[-1])
+        # % change must be vs the previous DAILY close, never the previous
+        # 1-minute bar (that comparison is ~0.00% almost every tick and was
+        # the reason the UI always showed a flat 0.00% change).
+        daily = self.get_candles(symbol, "1d")
+        if len(daily) >= 2:
+            prev = float(daily["Close"].iloc[-2])
+        elif len(daily) == 1:
+            prev = float(daily["Close"].iloc[-1])
+        else:
+            prev = px
         return {"symbol": symbol, "price": px,
                 "chg_pct": round((px / prev - 1) * 100, 2)}
 

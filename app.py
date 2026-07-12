@@ -1,6 +1,7 @@
 """QuantTrader — pro terminal UI (v0.2). Thin shell; engine in core/data/ai."""
 from __future__ import annotations
 
+import dataclasses
 import time
 
 import numpy as np
@@ -123,8 +124,31 @@ with st.sidebar:
                          disabled=not cfg.lse_api_key,
                          help="Pull the chart symbol's chain with "
                               "precomputed greeks each cycle")
+    with st.expander("PORTFOLIO CAPITAL", expanded=True):
+        aum_in = st.number_input(
+            "Total Portfolio Capital (AUM) $", min_value=0.0,
+            value=float(cfg.aum or cfg.starting_cash), step=500.0,
+            help="Your real total capital. 0 falls back to the paper "
+                 "broker's own live equity. Position-size caps below are "
+                 "measured against this number.")
+        mode_label = st.radio("Max position size", ["% of AUM", "Fixed $"],
+                              horizontal=True,
+                              index=1 if cfg.max_position_mode == "fixed"
+                              else 0)
+        if mode_label == "Fixed $":
+            fixed_cap_in = st.number_input(
+                "Max $ per position", min_value=0.0,
+                value=float(cfg.max_position_fixed_usd or 1000.0), step=100.0)
+            pct_cap_in = cfg.max_position_pct
+            mode_val = "fixed"
+        else:
+            pct_cap_in = st.slider("Max % of AUM per position", 1.0, 100.0,
+                                   float(cfg.max_position_pct), 1.0)
+            fixed_cap_in = cfg.max_position_fixed_usd
+            mode_val = "pct"
     with st.expander("RISK MANAGEMENT", expanded=True):
-        st.caption(f"Position cap · {cfg.max_position_pct}% of equity")
+        st.caption(f"Position cap · {pct_cap_in}% of AUM" if mode_val == "pct"
+                   else f"Position cap · ${fixed_cap_in:,.0f} fixed")
         st.caption(f"Gross exposure · ≤{cfg.max_gross_exposure_pct}%")
         st.caption(f"Daily loss halt · −{cfg.max_daily_loss_pct}%")
         st.caption(f"VaR ceiling · {cfg.max_var_pct}%")
@@ -151,6 +175,10 @@ with st.sidebar:
         st.rerun()
     st.caption(("🟢 feed running" if feed.running else "⚫ feed stopped") +
                f" · {len(symbols)} symbols · {feed.interval_s}s")
+
+E["risk"].cfg = dataclasses.replace(
+    cfg, aum=aum_in, max_position_mode=mode_val,
+    max_position_pct=pct_cap_in, max_position_fixed_usd=fixed_cap_in)
 
 # ---------------------------------------------------------------------------
 # NAV + LSE-style STATS STRIP: TRADES · WIN% · PF · P&L · DD · SR
@@ -293,14 +321,20 @@ with t_trades:
     with c1:
         st.markdown("### Open book")
         if broker.positions:
+            exposure_basis = aum_in if aum_in > 0 else eq
             rows = [{"ticker": t, "qty": p["qty"],
                      "avg": round(p["avg_price"], 2),
                      "mark": marks.get(t, "—"),
                      "P&L $": round((marks.get(t, p["avg_price"]) -
-                                     p["avg_price"]) * p["qty"], 0)}
+                                     p["avg_price"]) * p["qty"], 0),
+                     "% of AUM": round(p["qty"] * marks.get(t, p["avg_price"])
+                                       / exposure_basis * 100, 1)
+                     if exposure_basis > 0 else "—"}
                     for t, p in broker.positions.items()]
             st.dataframe(pd.DataFrame(rows), use_container_width=True,
                          hide_index=True)
+            st.caption(f"Exposure basis: ${exposure_basis:,.0f} "
+                       f"({'declared AUM' if aum_in > 0 else 'live paper equity'})")
         else:
             st.caption("Flat.")
     bk = state.get("risk.book") or {}

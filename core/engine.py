@@ -114,6 +114,18 @@ class RiskEngine:
                  f"gross exposure cap {self.cfg.max_gross_exposure_pct}%"))
             checks.append((notional <= broker.cash,
                            f"cash (${broker.cash:,.0f} available)"))
+            aum_basis = self.cfg.aum if self.cfg.aum > 0 else eq
+            if (self.cfg.max_position_mode == "fixed"
+                    and self.cfg.max_position_fixed_usd > 0):
+                cap_usd = self.cfg.max_position_fixed_usd
+                cap_label = f"${cap_usd:,.0f} fixed max position size"
+            else:
+                cap_usd = aum_basis * self.cfg.max_position_pct / 100
+                cap_label = (f"{self.cfg.max_position_pct}% of AUM "
+                             f"(${aum_basis:,.0f})")
+            checks.append((pos_after <= cap_usd,
+                           f"max position size — {cap_label} "
+                           f"(position would be ${pos_after:,.0f})"))
         daily = broker.daily_pnl_pct({order.ticker: price})
         checks.append((daily > -self.cfg.max_daily_loss_pct or
                        order.side == "SELL",
