@@ -16,15 +16,21 @@ LLM exactly as it does to the rules — no exceptions, by construction.
 """
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import pandas as pd
 
 from core.engine import AuditLog, Order, PaperBroker, RiskEngine
-from core.state import EventBus, GlobalState
-from data.providers import DataProvider
+from core.state import Event, EventBus, GlobalState
+from data.news import NewsProvider
+from data.providers import DataProvider, LSEProvider
+from quant.anomaly_library import match_anomalies
 from quant.playbook import build_playbook
 from quant.risk import correlation_heat, portfolio_var
+from quant.signals import BUY_TH, SELL_TH, composite, rsi
 from quant.surface_interpreter import interpret_surface
+from quant.verdict import MODELS
 from quant.verdict import analyze as qs_verdict
 
 TOOL_SCHEMAS = [
@@ -64,9 +70,11 @@ class RuleOrchestrator:
 
     def __init__(self, bus: EventBus, state: GlobalState, audit: AuditLog,
                  risk: RiskEngine, broker: PaperBroker,
-                 provider: DataProvider):
+                 provider: DataProvider, news: NewsProvider | None = None,
+                 lse: LSEProvider | None = None):
         self._bus, self._state, self._audit = bus, state, audit
         self._risk, self._broker, self._provider = risk, broker, provider
+        self._news, self._lse = news, lse
 
     # ---- indicators (self-contained; QuantSignal engines port in later) --
     @staticmethod
@@ -153,7 +161,9 @@ class RuleOrchestrator:
         return out
 
     def research(self, symbol: str) -> dict:
-        """Autonomous quant pass: EWMA vol + Monte Carlo odds -> state+audit."""
+        """Autonomous quant pass: EWMA vol + Monte Carlo odds -> state+audit,
+        plus any curated academic anomaly whose trigger condition matches
+        today's numbers on this symbol (quant.anomaly_library)."""
         df = self._provider.get_candles(symbol)
         if len(df) < 60:
             return {}
@@ -170,6 +180,22 @@ class RuleOrchestrator:
                "p_up_20d_pct": round(float((paths[:, -1] > 1).mean()) * 100, 1),
                "exp_move_20d": round(
                    float(df["Close"].iloc[-1]) * sig_d * np.sqrt(20), 2)}
+
+        comp = composite(df)
+        score = float(comp["score"].iloc[-1])
+        direction = 1 if score >= BUY_TH else (-1 if score <= SELL_TH else 0)
+        signs = np.sign([float(comp[m].iloc[-1]) for m in MODELS])
+        agree_frac = (float((signs == direction).sum()) / len(MODELS)
+                     if direction != 0 else 0.0)
+        today = time.localtime()
+        ctx = {"score": score, "agree_frac": agree_frac,
+              "rsi2": float(rsi(df["Close"], 2).iloc[-1]),
+              "ewma_ann_vol_pct": out["ewma_ann_vol_pct"],
+              "month": today.tm_mon, "trading_day_of_month": today.tm_mday}
+        anomalies = match_anomalies(ctx)
+        if anomalies:
+            out["anomalies"] = anomalies
+
         self._state.set(f"research.{symbol}", out, source="research")
         self._audit.record(
             "Research", "VOL+MONTECARLO", trigger=symbol,
@@ -178,6 +204,115 @@ class RuleOrchestrator:
                       f"P(up in 20d) {out['p_up_20d_pct']}% · expected "
                       f"1s move +/-${out['exp_move_20d']}",
             data=out)
+        if anomalies:
+            self._audit.record(
+                "Research", "ANOMALY MATCH", trigger=symbol,
+                model="anomaly_library (curated, rule-matched)",
+                reasoning=f"{symbol}: " + " | ".join(
+                    f"{a['name']} ({a['citation']})" for a in anomalies),
+                data={"anomalies": anomalies})
+        return out
+
+    def scan_news(self, symbol: str) -> dict:
+        """Headlines + sentiment -> state.news, audit, and an interrupt
+        event on a strong sentiment reading. Cleanly empty — no fake
+        headlines, no fake score — if NEWS_API_KEY is unset."""
+        if not self._news or not self._news.working:
+            return {}
+        headlines = self._news.company_news(symbol, days=3, limit=10)
+        sent = self._news.sentiment(symbol)
+        out = {"symbol": symbol, "headlines": headlines, **sent}
+        if not headlines and not sent:
+            return out
+        self._state.set(f"news.{symbol}", out, source="news")
+        self._audit.record(
+            "News", "HEADLINES+SENTIMENT", trigger=symbol,
+            model="Finnhub company-news + news-sentiment",
+            reasoning=(f"{symbol}: {len(headlines)} headline(s) in 3d"
+                      + (f" · bullish {sent['bullish_pct']}% / bearish "
+                         f"{sent['bearish_pct']}%" if sent else "")),
+            data=out)
+        if sent and (sent.get("bullish_pct", 0) >= 70
+                    or sent.get("bearish_pct", 0) >= 70):
+            self._bus.publish(Event("news.interrupt",
+                                    {"symbol": symbol, **sent}, source="news"))
+        return out
+
+    def scan_macro(self, series: list[str] | None = None) -> dict:
+        """Rates/CPI/economic-calendar snapshot -> state.macro + audit.
+        Symbols are the LSE SDK's own documented examples (cpi_yoy, fdtr,
+        US10Y). Empty/honest if the LSE key is unset or the vault has
+        nothing for a given series — never fabricates a number."""
+        if not self._lse or not self._lse.key:
+            return {}
+        series = series or ["cpi_yoy", "fdtr", "US10Y"]
+        out: dict = {}
+        for s in series:
+            df = self._lse.macro_series(s, limit=2, order="desc")
+            if not len(df):
+                continue
+            df.columns = [str(c).lower() for c in df.columns]
+            val_col = next((c for c in ("value", "close") if c in df.columns), None)
+            dt_col = next((c for c in ("date", "timestamp") if c in df.columns), None)
+            if val_col:
+                out[s] = {"latest": float(df[val_col].iloc[0]),
+                          "as_of": str(df[dt_col].iloc[0]) if dt_col else ""}
+        cal = self._lse.economic_calendar(region="US", order="asc", limit=10)
+        upcoming = []
+        if len(cal):
+            cal.columns = [str(c).lower() for c in cal.columns]
+            ev_col = next((c for c in ("event", "name", "title")
+                          if c in cal.columns), None)
+            dt_col = next((c for c in ("date", "start", "timestamp")
+                          if c in cal.columns), None)
+            for _, row in cal.head(5).iterrows():
+                upcoming.append({"event": str(row.get(ev_col, "")) if ev_col else "",
+                                "date": str(row.get(dt_col, "")) if dt_col else ""})
+        if upcoming:
+            out["upcoming_events"] = upcoming
+        if not out:
+            return out
+        self._state.set("macro", out, source="macro")
+        self._audit.record(
+            "Research", "MACRO SCAN",
+            model="LSE /series + /ref/economic_calendar",
+            reasoning="Macro snapshot: " + ", ".join(
+                f"{k}={v['latest']}" for k, v in out.items()
+                if k != "upcoming_events")
+                + (f" · {len(upcoming)} upcoming event(s)" if upcoming else ""),
+            data=out)
+        return out
+
+    def scan_flow(self, symbol: str, min_premium: float = 100_000) -> dict:
+        """Recent large option prints on `symbol` -> state.flow_alerts +
+        audit + an interrupt event. Real prints from LSE /options/flow, not
+        a chain-delta proxy. Distinct from the fuller statistical flow
+        engine (quant/optionflow.py, P6b) that consumes this same feed."""
+        if not self._lse or not self._lse.key:
+            return {}
+        df = self._lse.options_flow(underlying=symbol, min_premium=min_premium,
+                                    order="desc", limit=20)
+        if not len(df):
+            return {}
+        df.columns = [str(c).lower() for c in df.columns]
+        prem_col = next((c for c in ("premium", "notional")
+                        if c in df.columns), None)
+        prints = []
+        for _, row in df.head(10).iterrows():
+            prints.append({
+                "strike": row.get("strike"), "type": row.get("type"),
+                "premium": (float(row[prem_col])
+                           if prem_col and pd.notna(row.get(prem_col)) else None),
+                "expiry": str(row.get("expiry", ""))})
+        out = {"symbol": symbol, "min_premium": min_premium, "prints": prints}
+        self._state.set(f"flow_alerts.{symbol}", out, source="flow")
+        self._audit.record(
+            "Research", "FLOW ALERT", trigger=symbol,
+            model="LSE /options/flow (real prints, not a proxy)",
+            reasoning=f"{symbol}: {len(prints)} print(s) >= "
+                      f"${min_premium:,.0f} premium in the recent tape",
+            data=out)
+        self._bus.publish(Event("flow.interrupt", out, source="flow"))
         return out
 
     def ingest_chain(self, symbol: str, chain: pd.DataFrame) -> dict:

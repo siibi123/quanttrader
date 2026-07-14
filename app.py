@@ -12,6 +12,7 @@ import streamlit as st
 from ai.orchestrator import RuleOrchestrator, TOOL_SCHEMAS
 from core.engine import AuditLog, PaperBroker, RiskEngine
 from core.state import Config, EventBus, GlobalState
+from data.news import NewsProvider
 from data.providers import (CompositeProvider, LSEProvider, PollingFeed,
                             YahooProvider)
 
@@ -84,17 +85,19 @@ def get_engine():
     state = GlobalState(bus)
     audit = AuditLog(bus)
     lse = LSEProvider(cfg.lse_api_key, cfg.lse_base_url)
+    news = NewsProvider(cfg.news_api_key)
     provider = CompositeProvider([lse, YahooProvider()], state)
     broker = PaperBroker(cfg, bus, state, audit)
     risk = RiskEngine(cfg, bus, state, audit)
-    orch = RuleOrchestrator(bus, state, audit, risk, broker, provider)
+    orch = RuleOrchestrator(bus, state, audit, risk, broker, provider,
+                            news=news, lse=lse)
     feed = PollingFeed(bus, state, provider,
                        ["SPY", "QQQ", "AAPL", "NVDA"], interval_s=45)
     state.set("session", {"started": time.strftime(
         "%Y-%m-%d %H:%M UTC", time.gmtime())})
     return dict(cfg=cfg, bus=bus, state=state, audit=audit, lse=lse,
-                provider=provider, broker=broker, risk=risk, orch=orch,
-                feed=feed)
+                news=news, provider=provider, broker=broker, risk=risk,
+                orch=orch, feed=feed)
 
 
 E = get_engine()
@@ -124,6 +127,17 @@ with st.sidebar:
                          disabled=not cfg.lse_api_key,
                          help="Pull the chart symbol's chain with "
                               "precomputed greeks each cycle")
+        news_pass = st.toggle("News + sentiment pass (Finnhub)",
+                              value=bool(cfg.news_api_key),
+                              disabled=not cfg.news_api_key,
+                              help="Headlines + sentiment per watchlist "
+                                   "symbol each cycle")
+        macro_pass = st.toggle("Macro + flow pass (LSE)",
+                               value=bool(cfg.lse_api_key),
+                               disabled=not cfg.lse_api_key,
+                               help="Rates/CPI/economic-calendar snapshot "
+                                    "plus large options-print alerts on "
+                                    "the chart symbol each cycle")
     with st.expander("PORTFOLIO CAPITAL", expanded=True):
         aum_in = st.number_input(
             "Total Portfolio Capital (AUM) $", min_value=0.0,
@@ -232,12 +246,17 @@ if run:
     with st.spinner("Research → propose → risk review → execute…"):
         for s_ in symbols:
             orch.research(s_)
+            if news_pass and cfg.news_api_key:
+                orch.scan_news(s_)
         if deep and cfg.lse_api_key:
             orch.ingest_chain(chart_sym,
                               E["lse"].options_chain(chart_sym))
+        if macro_pass and cfg.lse_api_key:
+            orch.scan_macro()
+            orch.scan_flow(chart_sym)
         new_fills = orch.step(symbols, risk_pct=rp)
     st.toast(f"Cycle complete — {len(new_fills)} fill(s) · research + "
-             f"greeks in AUDIT")
+             f"news/macro/flow in AUDIT")
 
 # ---------------------------------------------------------------------------
 # TABS — CHART | METRICS | TRADES | AUDIT
@@ -311,6 +330,38 @@ with t_metrics:
             st.markdown(f"### {title}")
             st.dataframe(pd.DataFrame(d.values()),
                          use_container_width=True, hide_index=True)
+    macro_d = state.get("macro") or {}
+    if macro_d:
+        st.markdown("### Macro")
+        lines = [f"{k} = {v['latest']} (as of {v.get('as_of', '—')})"
+                for k, v in macro_d.items()
+                if k != "upcoming_events" and isinstance(v, dict)]
+        if lines:
+            st.caption(" · ".join(lines))
+        if macro_d.get("upcoming_events"):
+            st.caption("Upcoming: " + "; ".join(
+                f"{e['event']} ({e['date']})"
+                for e in macro_d["upcoming_events"][:5]))
+
+    news_d = state.get("news") or {}
+    if news_d:
+        st.markdown("### News & Sentiment")
+        for sym, n in news_d.items():
+            line = f"**{sym}**"
+            if n.get("bullish_pct") is not None:
+                line += (f" · bullish {n['bullish_pct']}% / "
+                        f"bearish {n['bearish_pct']}%")
+            st.caption(line)
+            for h in (n.get("headlines") or [])[:3]:
+                st.caption(f"— {h['headline']} ({h['source']})")
+
+    flow_d = state.get("flow_alerts") or {}
+    if flow_d:
+        st.markdown("### Flow Alerts (large option prints)")
+        for sym, f_ in flow_d.items():
+            st.caption(f"**{sym}**: {len(f_['prints'])} print(s) ≥ "
+                       f"${f_['min_premium']:,.0f} premium")
+
     if not (state.get("signals") or state.get("research")):
         st.caption("Run a decision cycle to populate.")
     st.caption(f"AI contract: {len(TOOL_SCHEMAS)} tools · LLM socket awaits "

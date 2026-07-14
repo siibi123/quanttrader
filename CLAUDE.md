@@ -6,12 +6,12 @@ Yahav — Israeli retail trader, NON-CODER. You build/test/commit/push; explain 
 ## What this is
 A fresh, enterprise-grade quant platform. Event-driven engine (core/), pluggable data (data/), AI-ready orchestration (ai/), thin Streamlit shell (app.py). Deployed later to Streamlit Cloud and eventually a VPS; engine must always run headless.
 
-## Architecture (v0.4 — 44/44 core tests passing)
+## Architecture (v0.4 — 55/55 core tests passing)
 - core/state.py — Config (.env only), EventBus (thread-safe pub/sub), GlobalState (dot-path store; to_ai_context() exports curated snapshot for the AI)
 - core/engine.py — AuditLog (JSONL, reasoning attached to every action), RiskEngine (ABSOLUTE veto: position/gross/daily-loss/VaR caps), PaperBroker (refuses unapproved orders; slippage+fees; persisted)
 - data/providers.py — DataProvider ABC; LSEProvider (probe-then-lock endpoints — their docs are JS-rendered, NEVER hardcode guessed URLs); YahooProvider fallback; FakeProvider for tests; CompositeProvider chain; PollingFeed (background thread → tick events)
 - ai/orchestrator.py — TOOL_SCHEMAS (the ONLY machine surface the AI may use); RuleOrchestrator v1 (deterministic, reasoning strings, risk-reviewed); LLMOrchestrator socket (refuses without ANTHROPIC_API_KEY — no fake AI, ever)
-- tests/test_core.py — run `python tests/test_core.py` before EVERY commit; extend it with every new module (currently 44 checks). NOTE: on this machine `python3` resolves to the Windows Store stub and hangs — use `python`.
+- tests/test_core.py — run `python tests/test_core.py` before EVERY commit; extend it with every new module (currently 55 checks). NOTE: on this machine `python3` resolves to the Windows Store stub and hangs — use `python`.
 
 ## IRON RULES
 1. PAPER ONLY. No real broker execution without an explicit, separate, owner-confirmed phase.
@@ -24,6 +24,11 @@ A fresh, enterprise-grade quant platform. Event-driven engine (core/), pluggable
 8. 1GB-class hosting: no torch/GPU deps; cache aggressively; every network call fails gracefully.
 9. Honesty in UI copy: no promised returns; paper results labeled paper.
 
+## PROGRESS (updated after every phase)
+- DONE: v0.3 baseline (QuantSignal engines), P1 (LSE quote fix + AUM/position-size risk controls), P2 (HMM regime, Kalman pairs, GARCH, Ledoit-Wolf), P3 (3D vol surface + surface_interpreter.py), P4 (Finnhub news/sentiment, verified LSE macro + options-flow endpoints, curated anomaly library). All pushed to main except P4 (awaiting push confirmation).
+- IN PROGRESS: none — P4 code complete, tests passing (55/55), about to commit/push.
+- NEXT: P5 (sector and target engine), P6 (Flow Confluence Engine — orderflow, optionflow, flow_confluence + FLOW panel).
+
 ## ROADMAP (build in order; owner picks pace)
 DONE (v0.3): QuantSignal engines live in quant/ (signals, bxtrender, backtest v2, verdict, playbook, scanner, risk, validation, montecarlo, levels, advanced). Playbook+verdict drive the policy; correlation_heat+VaR guard the book each cycle.
 
@@ -33,7 +38,7 @@ P2 — DONE (pushed): quant/hmm_regime.py (hand-rolled Gaussian HMM, Baum-Welch 
 
 P3 — DONE (pushed): quant/vol_surface.py (normalizes an options chain — tolerates a few strike/iv/dte-or-expiry column-naming conventions since the exact LSE shape isn't hardcoded-guessed — into a strike x DTE x IV grid) + Plotly Surface chart in the LAB tab ("Build vol surface" button, needs LSE_API_KEY). quant/surface_interpreter.py — rule-based, deterministic plain-text reads (skew in vol points via 25-delta or a strike proxy, term-structure inversion via near-vs-far ATM IV, single-strike smile anomalies vs a local rolling median). Wired into RuleOrchestrator.ingest_chain: findings land in state.options.{symbol}.surface, get their own "VOL SURFACE" audit record, and flow into AI context automatically (options is already a curated AI_KEYS key). No LLM calls anywhere in this phase.
 
-P4 — Intelligence feeds: Finnhub news/sentiment behind NEWS_API_KEY, clean stub with no key. LSE macro endpoints (rates, CPI) into state.macro. Curated anomaly library with academic citations injected into AI context. LSE options-flow spikes as institutional flow tracker. Never fake data that has no real source.
+P4 — DONE: data/news.py (Finnhub company-news + news-sentiment, clean empty stub with no NEWS_API_KEY — these are standard public Finnhub endpoints, not a probe-then-lock situation). LSEProvider gained macro_series() (GET /series — rates/CPI/bond yields, e.g. "cpi_yoy"/"fdtr"/"US10Y"), economic_calendar() (GET /ref/economic_calendar), and options_flow() (GET /options/flow — REAL trade prints with premium/IV/greeks, verified to exist, not a proxy). All three verified 2026-07-12 by `pip install lse-data==0.14.0` and reading the actual installed lse/client.py + lse/vault.py source — WebFetch on their GitHub gave three mutually contradictory endpoint lists across three separate fetches and was not trustworthy enough to hardcode from. quant/anomaly_library.py: 9 curated, real-citation anomalies (momentum, short-term reversal, PEAD, low-vol, size, value, January effect, turn-of-month, disposition effect) with pure-function trigger conditions — the full list is reference material for the future LLMOrchestrator's system prompt; match_anomalies() also wires the subset that matches TODAY's numbers into RuleOrchestrator.research() -> state.research.{symbol}.anomalies + an "ANOMALY MATCH" audit record now. RuleOrchestrator gained scan_news() (-> state.news, audit, news.interrupt event on strong sentiment), scan_macro() (-> state.macro, audit), scan_flow() (-> state.flow_alerts, audit, flow.interrupt event on large prints — a simple threshold alert, distinct from the fuller statistical engine P6b builds on the same feed). state.macro added to GlobalState.AI_KEYS. Sidebar gained "News + sentiment pass" and "Macro + flow pass" toggles (gated on the relevant key), wired into the RUN DECISION CYCLE button. METRICS tab shows Macro/News/Flow Alerts sections. No new dependencies.
 
 P5 — Sector and target engine: multi-factor scoring (flow spikes, momentum, macro tilt, sentiment) producing ranked sectors/names with entry, stop, avoid zones. Every suggestion carries its computed mathematical reason. All orders still go through propose → RiskEngine veto → PaperBroker → AuditLog.
 

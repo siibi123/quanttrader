@@ -17,6 +17,8 @@ from quant.garch import garch_forecast
 from quant.covariance import shrunk_covariance, min_variance_weights
 from quant.vol_surface import build_surface_grid
 from quant.surface_interpreter import interpret_surface
+from quant.anomaly_library import match_anomalies
+from data.news import NewsProvider
 
 results = []
 def check(name, cond):
@@ -268,6 +270,77 @@ check("ingest_chain: surface findings attached to the options state entry",
       "surface" in _ing and len(_ing["surface"]["findings"]) >= 1)
 check("ingest_chain: VOL SURFACE audit record created",
       any(r["action"] == "VOL SURFACE" for r in audit.tail(20)))
+
+# ---- 19. P4: NewsProvider stub (no key -> honest empty, never fabricated)
+_news_stub = NewsProvider(api_key="")
+check("news: no key -> empty headlines/sentiment, not fabricated",
+      _news_stub.company_news("AAPL") == [] and _news_stub.sentiment("AAPL") == {}
+      and not _news_stub.working)
+
+# ---- 20. P4: anomaly_library — trigger matching is honest (empty context -> nothing)
+check("anomaly_library: momentum trigger fires on a strong agreeing score",
+      any(a["name"] == "Momentum"
+          for a in match_anomalies({"score": 0.5, "agree_frac": 0.9})))
+check("anomaly_library: empty context matches nothing (no fabricated triggers)",
+      match_anomalies({}) == [])
+
+# ---- 21. P4: LSEProvider macro_series / economic_calendar / options_flow parsing
+def _fake_lse_get(path, params):
+    if path == "/series":
+        sym = params.get("symbol")
+        return [{"date": "2026-07-01", "value": 3.1 if sym == "cpi_yoy" else 5.33},
+                {"date": "2026-06-01", "value": 3.0}]
+    if path == "/ref/economic_calendar":
+        return [{"event": "CPI m/m", "date": "2026-07-15"},
+                {"event": "FOMC Rate Decision", "date": "2026-07-30"}]
+    if path == "/options/flow":
+        return [{"strike": 200, "type": "call", "premium": 150000, "expiry": "2026-08-21"},
+                {"strike": 195, "type": "put", "premium": 120000, "expiry": "2026-08-21"}]
+    return None
+
+lse4 = LSEProvider(api_key="dummy-key-for-test")
+lse4._get = _fake_lse_get
+_mv = lse4.macro_series("cpi_yoy")
+check("lse: macro_series parses (date, value) rows",
+      len(_mv) == 2 and float(_mv["value"].iloc[0]) == 3.1)
+_cal = lse4.economic_calendar(region="US")
+check("lse: economic_calendar returns upcoming events",
+      len(_cal) == 2 and "event" in [c.lower() for c in _cal.columns])
+_flow = lse4.options_flow(underlying="AAPL", min_premium=100000)
+check("lse: options_flow parses strike/type/premium rows",
+      len(_flow) == 2 and float(_flow["premium"].iloc[0]) == 150000)
+
+# ---- 22. P4: RuleOrchestrator news/macro/flow scans wire into state+audit+bus
+news4 = NewsProvider(api_key="dummy-key-for-test")
+news4.company_news = lambda symbol, days=3, limit=10: [
+    {"symbol": symbol, "headline": "Big beat on earnings", "source": "Reuters",
+     "url": "", "ts": 0}]
+news4.sentiment = lambda symbol: {"symbol": symbol, "bullish_pct": 82.0,
+                                  "bearish_pct": 10.0, "buzz_articles_week": 40,
+                                  "buzz_z": 1.2}
+orch4 = RuleOrchestrator(bus, state, audit, risk, broker, FakeProvider(),
+                         news=news4, lse=lse4)
+
+n_news = len(bus.recent(500, "news.interrupt"))
+out_news = orch4.scan_news("AAPL")
+check("scan_news: headlines+sentiment land in state.news",
+      state.get("news.AAPL") is not None and out_news["bullish_pct"] == 82.0)
+check("scan_news: strong sentiment publishes a news.interrupt event",
+      len(bus.recent(500, "news.interrupt")) > n_news)
+
+out_macro = orch4.scan_macro()
+check("scan_macro: rates/CPI snapshot + calendar land in state.macro",
+      state.get("macro.cpi_yoy.latest") == 3.1
+      and len(out_macro.get("upcoming_events", [])) == 2)
+
+n_flow = len(bus.recent(500, "flow.interrupt"))
+out_flow = orch4.scan_flow("AAPL", min_premium=100000)
+check("scan_flow: large prints land in state.flow_alerts + publish an interrupt",
+      len(out_flow["prints"]) == 2 and len(bus.recent(500, "flow.interrupt")) > n_flow)
+
+_res4 = orch4.research("P4TEST")
+check("research: core EWMA/MC fields still present after anomaly wiring",
+      {"ewma_ann_vol_pct", "p_up_20d_pct", "exp_move_20d"} <= set(_res4.keys()))
 
 print("\n" + "=" * 44)
 passed = sum(1 for _, ok in results if ok)

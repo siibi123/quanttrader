@@ -78,6 +78,19 @@ class LSEProvider(DataProvider):
       Timeframes: 1s 5s 15s 30s 1m 3m 5m 15m 30m 1h 4h 1d 1w 1mo.
       Options chain w/ greeks: GET /vault/options/chain?underlying=...
       WebSocket (verified to exist): wss://data-ws.londonstrategicedge.com
+
+      Verified 2026-07-12 by installing the real `lse-data` v0.14.0
+      package from PyPI and reading lse/client.py + lse/vault.py source
+      directly (WebFetch on their GitHub repo gave THREE mutually
+      contradictory endpoint lists across three fetches — not trustworthy
+      for something this consequential, so ground truth came from the
+      actual installed package instead):
+        Macro series (rates, CPI, bond yields): GET /vault/series
+            ?symbol=cpi_yoy|fdtr|US10Y|...&dataset=&start=&end=&order=&limit=
+        Macro events (CPI/NFP/rate decisions/GDP): GET /vault/ref/economic_calendar
+            ?region=&event=&start=&end=&released=&order=&limit=
+        Options flow (real trade prints, not a proxy): GET /vault/options/flow
+            ?underlying=&type=&min_premium=&max_dte=&start=&end=&order=&limit=
     """
     name = "lse"
     VAULT = "https://api.londonstrategicedge.com/vault"
@@ -162,6 +175,41 @@ class LSEProvider(DataProvider):
 
     def usage(self) -> dict:
         return self._get("/usage", {}) or {}
+
+    def macro_series(self, symbol: str, dataset: str | None = None,
+                     start: str | None = None, end: str | None = None,
+                     order: str = "asc", limit: int = 5000) -> pd.DataFrame:
+        """One (date, value) observation series — any macro economics
+        series or bond yield tenor (e.g. "cpi_yoy", "fdtr", "US10Y")."""
+        rows = self._get("/series", {"symbol": symbol, "dataset": dataset,
+                                     "start": start, "end": end,
+                                     "order": order, "limit": limit})
+        return pd.DataFrame(rows) if isinstance(rows, list) else pd.DataFrame()
+
+    def economic_calendar(self, region: str | None = None,
+                          event: str | None = None, start: str | None = None,
+                          end: str | None = None, released_only: bool = False,
+                          order: str = "asc", limit: int = 5000) -> pd.DataFrame:
+        """Macro economic events — CPI, NFP, rate decisions, GDP."""
+        rows = self._get("/ref/economic_calendar",
+                         {"region": region, "event": event, "start": start,
+                          "end": end, "released": 1 if released_only else None,
+                          "order": order, "limit": limit})
+        return pd.DataFrame(rows) if isinstance(rows, list) else pd.DataFrame()
+
+    def options_flow(self, underlying: str | None = None,
+                     type: str | None = None, min_premium: float | None = None,
+                     max_dte: int | None = None, start: str | None = None,
+                     end: str | None = None, order: str = "desc",
+                     limit: int = 5000) -> pd.DataFrame:
+        """Recent option prints (time & sales): trade, premium, IV and
+        greeks at print time — a real feed, not a chain-delta proxy."""
+        rows = self._get("/options/flow",
+                         {"underlying": underlying, "type": type,
+                          "min_premium": min_premium, "max_dte": max_dte,
+                          "start": start, "end": end, "order": order,
+                          "limit": limit})
+        return pd.DataFrame(rows) if isinstance(rows, list) else pd.DataFrame()
 
 
 class FakeProvider(DataProvider):
