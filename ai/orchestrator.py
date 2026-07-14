@@ -26,6 +26,7 @@ from core.state import Event, EventBus, GlobalState
 from data.news import NewsProvider
 from data.providers import DataProvider, LSEProvider
 from quant.anomaly_library import match_anomalies
+from quant.flow_confluence import confluence
 from quant.playbook import build_playbook
 from quant.risk import correlation_heat, portfolio_var
 from quant.sector_engine import rank_sectors_and_names
@@ -321,6 +322,46 @@ class RuleOrchestrator:
         self._bus.publish(Event("flow.interrupt", out, source="flow"))
         return out
 
+    def scan_flow_confluence(self, symbol: str) -> dict:
+        """One CONFLUENCE read per symbol -> state.flow.{symbol}, audit,
+        and a VPIN-toxicity caution folded into RiskEngine's reasoning
+        trail (informational only, never a veto — that stays a hard-veto
+        decision the owner makes explicitly, not this method).
+
+        Options positioning uses today's LSE options_flow() snapshot.
+        Flow-spike z-scoring needs >= 10 days of daily flow history;
+        options_flow() only covers a trailing week, so that baseline
+        isn't built here yet — premium_share (call/put split) alone
+        drives the options-positioning read for now."""
+        df = self._provider.get_candles(symbol)
+        if len(df) < 40:
+            return {}
+        flow_today = None
+        if self._lse and self._lse.key:
+            flow_today = self._lse.options_flow(underlying=symbol, max_dte=45,
+                                                limit=500)
+        out = confluence(df, flow_today)
+        out["symbol"] = symbol
+        self._state.set(f"flow.{symbol}", out, source="flow")
+        self._audit.record(
+            "Research", "FLOW CONFLUENCE", trigger=symbol,
+            model="quant.flow_confluence (BVC/CVD/VPIN + options premium share)",
+            reasoning=(f"{symbol}: {out['verdict']} · tape "
+                      f"{out['tape_score']:+.2f} · options "
+                      f"{out['options_score']:+.2f} · " +
+                      " | ".join(out["tape_reasons"] + out["options_reasons"])),
+            data=out)
+        if out.get("toxic_caution"):
+            self._audit.record(
+                "RiskEngine", "CAUTION FLAG", trigger=symbol,
+                model="VPIN toxicity (informational only, not a veto)",
+                reasoning=(f"{symbol}: VPIN toxicity "
+                          f"{out.get('vpin_percentile')}pct (>=85th) — "
+                          f"elevated informed-trading risk; RiskEngine's "
+                          f"actual checks are unchanged, this is advisory"),
+                data={"vpin_percentile": out.get("vpin_percentile")})
+        return out
+
     def sector_scan(self, symbols: list[str], account: float = 5000.0,
                     risk_pct: float = 1.0) -> dict:
         """Multi-factor sector/name ranking (quant.sector_engine): verdict's
@@ -343,7 +384,7 @@ class RuleOrchestrator:
                     if "sector" in prof.columns:
                         sectors[s] = str(prof["sector"].iloc[0])
 
-        sentiment_by, flow_by = {}, {}
+        sentiment_by, flow_by, confluence_by = {}, {}, {}
         for s in data:
             n = self._state.get(f"news.{s}")
             if n and n.get("bullish_pct") is not None:
@@ -351,6 +392,9 @@ class RuleOrchestrator:
             f = self._state.get(f"flow_alerts.{s}")
             if f:
                 flow_by[s] = f
+            fc = self._state.get(f"flow.{s}")
+            if fc:
+                confluence_by[s] = fc
 
         rate = (self._state.get("macro") or {}).get("fdtr") or {}
         macro_trend = rate.get("trend")
@@ -359,7 +403,8 @@ class RuleOrchestrator:
                                      risk_pct=risk_pct,
                                      sentiment_by_ticker=sentiment_by,
                                      flow_by_ticker=flow_by,
-                                     macro_trend=macro_trend)
+                                     macro_trend=macro_trend,
+                                     flow_confluence_by_ticker=confluence_by)
         self._state.set("sector_scan", out, source="research")
         top_sec = out["sectors"][0]["sector"] if out["sectors"] else "none"
         top_names = ", ".join(f"{n['ticker']} ({n['target_score']})"

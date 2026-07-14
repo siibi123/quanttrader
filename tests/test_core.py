@@ -19,6 +19,9 @@ from quant.vol_surface import build_surface_grid
 from quant.surface_interpreter import interpret_surface
 from quant.anomaly_library import match_anomalies
 from quant.sector_engine import rank_sectors_and_names, score_name
+from quant.orderflow import bulk_volume_classification, cvd, vpin, volume_profile
+from quant.optionflow import flow_spike, largest_prints, premium_share
+from quant.flow_confluence import confluence
 from data.news import NewsProvider
 
 results = []
@@ -379,6 +382,107 @@ _scan5 = orch5.sector_scan(["P5A", "P5B"], account=10000, risk_pct=1.0)
 check("sector_scan: writes state.sector_scan and a SECTOR SCAN audit record",
       state.get("sector_scan") is not None
       and any(r["action"] == "SECTOR SCAN" for r in audit.tail(20)))
+
+# ---- 25. P6a: orderflow — BVC/CVD confirms a healthy uptrend
+_rng6 = np.random.default_rng(9)
+_n6 = 200
+_close6 = 100 * np.exp(np.cumsum(_rng6.normal(0.002, 0.008, _n6)))
+_vol6 = np.abs(1e6 + _rng6.normal(0, 1e5, _n6))
+_df6 = pd.DataFrame({"Open": _close6, "High": _close6 * 1.005,
+                    "Low": _close6 * 0.995, "Close": _close6, "Volume": _vol6},
+                    index=pd.bdate_range("2024-01-01", periods=_n6))
+_cvd6 = cvd(_df6)
+check("orderflow: CVD confirms a healthy uptrend (no divergence)",
+      _cvd6["cvd_chg"] > 0 and _cvd6["divergence"] is None)
+
+# same series but the last 20 bars get low volume on up-closes, high on down-closes
+_close7 = _close6.copy(); _vol7 = _vol6.copy()
+for i in range(_n6 - 20, _n6):
+    _vol7[i] = 2e5 if _close7[i] > _close7[i - 1] else 2e6
+_df7 = pd.DataFrame({"Open": _close7, "High": _close7 * 1.005,
+                    "Low": _close7 * 0.995, "Close": _close7, "Volume": _vol7},
+                    index=pd.bdate_range("2024-01-01", periods=_n6))
+check("orderflow: CVD flags a bearish divergence when volume contradicts price",
+      cvd(_df7)["divergence"] == "bearish")
+
+_rng8 = np.random.default_rng(5)
+_n8 = 150
+_close8 = 100 * np.exp(np.cumsum(_rng8.normal(0.0, 0.005, _n8)))
+_vol8 = np.full(_n8, 1e6)
+_close8[-20:] = _close8[-21] * np.exp(np.cumsum(np.full(20, 0.01)))
+_vol8[-20:] = 5e6
+_df8 = pd.DataFrame({"Open": _close8, "High": _close8 * 1.01, "Low": _close8 * 0.99,
+                    "Close": _close8, "Volume": _vol8},
+                    index=pd.bdate_range("2024-01-01", periods=_n8))
+_vp8 = vpin(_df8)
+check("orderflow: VPIN flags toxicity after a sudden one-directional volume spike",
+      _vp8["toxic"] and _vp8["percentile"] >= 85)
+_prof = volume_profile(_df6)
+check("orderflow: volume_profile returns top-3 nodes, sane volume shares",
+      len(_prof) == 3 and all(0 <= p["volume_pct"] <= 100 for p in _prof))
+
+# ---- 26. P6b: optionflow — premium share, spike z-score, largest prints
+_flow_today = pd.DataFrame([
+    {"strike": 200, "type": "call", "premium": 300000, "volume": 500, "expiry": "2026-08-21"},
+    {"strike": 195, "type": "put", "premium": 100000, "volume": 200, "expiry": "2026-08-21"},
+])
+_ps = premium_share(_flow_today)
+check("optionflow: premium_share splits call/put correctly",
+      abs(_ps["call_share_pct"] + _ps["put_share_pct"] - 100) < 0.01
+      and _ps["call_share_pct"] > _ps["put_share_pct"])
+check("optionflow: flow_spike is honest about insufficient history",
+      "error" in flow_spike(_flow_today, [_flow_today] * 3))
+_rng9 = np.random.default_rng(3)
+_hist9 = [pd.DataFrame([{"strike": 200, "type": "call",
+                        "premium": 60000 + _rng9.normal(0, 10000),
+                        "volume": 150 + _rng9.normal(0, 20)}]) for _ in range(20)]
+_spike9 = flow_spike(pd.DataFrame([{"strike": 200, "type": "call",
+                                   "premium": 300000, "volume": 800}]), _hist9)
+check("optionflow: flow_spike detects a large z-score spike vs the norm",
+      "error" not in _spike9 and _spike9["volume_z"] > 3)
+_top = largest_prints(_flow_today, top_n=1)
+check("optionflow: largest_prints returns the single biggest premium print",
+      len(_top) == 1 and _top[0]["premium"] == 300000)
+
+# ---- 27. P6c: flow_confluence — LONG / CONFLICT / QUIET classification
+_calls_heavy = pd.DataFrame([{"strike": 200, "type": "call", "premium": 400000,
+                             "volume": 500},
+                            {"strike": 195, "type": "put", "premium": 30000,
+                             "volume": 50}])
+_puts_heavy = pd.DataFrame([{"strike": 200, "type": "call", "premium": 30000,
+                            "volume": 50},
+                           {"strike": 195, "type": "put", "premium": 400000,
+                            "volume": 500}])
+check("flow_confluence: bullish tape + call-heavy flow -> CONFLUENCE LONG",
+      confluence(_df6, _calls_heavy)["verdict"] == "CONFLUENCE LONG")
+check("flow_confluence: bullish tape + put-heavy flow -> CONFLICT",
+      confluence(_df6, _puts_heavy)["verdict"] == "CONFLICT")
+_flat = pd.DataFrame({"Open": [100.0] * 60, "High": [100.1] * 60,
+                     "Low": [99.9] * 60, "Close": [100.0] * 60,
+                     "Volume": [1000.0] * 60},
+                     index=pd.bdate_range("2024-01-01", periods=60))
+_neutral_flow = pd.DataFrame([{"strike": 100, "type": "call", "premium": 50000,
+                              "volume": 50},
+                             {"strike": 100, "type": "put", "premium": 50000,
+                              "volume": 50}])
+check("flow_confluence: flat tape + neutral flow -> QUIET",
+      confluence(_flat, _neutral_flow)["verdict"] == "QUIET")
+
+# ---- 28. P6c: RuleOrchestrator.scan_flow_confluence wires state + audit
+orch6 = RuleOrchestrator(bus, state, audit, risk, broker, FakeProvider())
+_fc6 = orch6.scan_flow_confluence("P6TEST")
+check("scan_flow_confluence: writes state.flow + a FLOW CONFLUENCE audit record",
+      state.get("flow.P6TEST") is not None
+      and any(r["action"] == "FLOW CONFLUENCE" for r in audit.tail(20)))
+
+# ---- 29. P6c: flow-confluence tilt feeds into P5 sector scoring
+# _strong_up (test 23) is already confirmed to produce a LONG verdict.
+_base9 = score_name(_strong_up)
+_agree9 = score_name(_strong_up, flow_confluence={"verdict": "CONFLUENCE LONG"})
+_disagree9 = score_name(_strong_up, flow_confluence={"verdict": "CONFLUENCE SHORT"})
+check("sector_engine: agreeing flow confluence raises target_score, "
+      "disagreeing lowers it",
+      _agree9["target_score"] > _base9["target_score"] > _disagree9["target_score"])
 
 print("\n" + "=" * 44)
 passed = sum(1 for _, ok in results if ok)

@@ -533,6 +533,65 @@ with t_lab:
                        "DECISION CYCLE's propose → RiskEngine veto → "
                        "PaperBroker → AuditLog chain.")
 
+    st.markdown("### 🌊 Flow Confluence")
+    if st.button("Scan flow confluence", use_container_width=True):
+        from quant.orderflow import cvd as flow_cvd, vpin as flow_vpin
+        with st.spinner("Tape (BVC/CVD/VPIN) × options positioning…"):
+            df_flow = E["provider"].get_candles(chart_sym)
+            fc = orch.scan_flow_confluence(chart_sym)
+        if not fc:
+            st.info(f"Not enough bars for {chart_sym} yet (need 40+).")
+        else:
+            c1f, c2f = st.columns([2, 1])
+            with c1f:
+                cd = flow_cvd(df_flow)
+                if "error" not in cd:
+                    fig3 = go.Figure()
+                    fig3.add_trace(go.Scatter(
+                        x=df_flow.index, y=df_flow["Close"], name="Price",
+                        yaxis="y1", line=dict(color=ACCENT)))
+                    fig3.add_trace(go.Scatter(
+                        x=cd["cvd_series"].index, y=cd["cvd_series"].values,
+                        name="CVD", yaxis="y2", line=dict(color="#f59e0b")))
+                    fig3.update_layout(
+                        height=340, margin=dict(l=6, r=6, t=24, b=6),
+                        paper_bgcolor="#0a0a0a", plot_bgcolor="#0a0a0a",
+                        font=dict(color="#a1a1aa", family="IBM Plex Mono", size=11),
+                        yaxis=dict(title="Price", side="left", gridcolor="#161618"),
+                        yaxis2=dict(title="CVD", side="right", overlaying="y",
+                                   gridcolor="#161618"),
+                        xaxis=dict(gridcolor="#161618"),
+                        legend=dict(orientation="h", y=1.08))
+                    st.plotly_chart(fig3, use_container_width=True)
+                else:
+                    st.caption(cd["error"])
+            with c2f:
+                vp = flow_vpin(df_flow)
+                if "error" not in vp:
+                    fig4 = go.Figure(go.Indicator(
+                        mode="gauge+number", value=vp["percentile"],
+                        title={"text": "VPIN toxicity percentile"},
+                        gauge={"axis": {"range": [0, 100]},
+                              "bar": {"color": "#ef4444" if vp["toxic"] else ACCENT},
+                              "steps": [{"range": [0, 85], "color": "#141417"},
+                                       {"range": [85, 100], "color": "#3f1212"}]}))
+                    fig4.update_layout(
+                        height=220, margin=dict(l=6, r=6, t=30, b=6),
+                        paper_bgcolor="#0a0a0a",
+                        font=dict(color="#a1a1aa", family="IBM Plex Mono", size=11))
+                    st.plotly_chart(fig4, use_container_width=True)
+                st.caption("Options premium imbalance (put ← → call)")
+                st.progress(min(max((fc["options_score"] + 1) / 2, 0.0), 1.0))
+            badge = {"CONFLUENCE LONG": ACCENT, "CONFLUENCE SHORT": "#ef4444",
+                    "CONFLICT": "#f59e0b", "QUIET": "#71717a"}.get(fc["verdict"],
+                                                                  "#71717a")
+            st.markdown(
+                f"<div class='qt-panel'><b style='color:{badge}'>{fc['verdict']}"
+                f"</b> · tape {fc['tape_score']:+.2f} · options "
+                f"{fc['options_score']:+.2f}<br>" +
+                " · ".join(fc["tape_reasons"] + fc["options_reasons"]) +
+                "</div>", unsafe_allow_html=True)
+
 with t_audit:
     st.markdown("### Audit timeline — trigger → model → reasoning")
     tail = audit.tail(20)

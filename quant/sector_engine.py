@@ -20,11 +20,13 @@ from .verdict import analyze as verdict_analyze
 MACRO_TILT_PTS = 3.0
 SENTIMENT_TILT_PTS = 8.0
 FLOW_TILT_PTS = 5.0
+FLOW_CONFLUENCE_TILT_PTS = 6.0
 
 
 def score_name(df: pd.DataFrame, account: float = 5000.0, risk_pct: float = 1.0,
                sentiment: dict | None = None, flow: dict | None = None,
-               macro_trend: str | None = None) -> dict:
+               macro_trend: str | None = None,
+               flow_confluence: dict | None = None) -> dict:
     """One ticker's verdict + tilts -> one target-engine score."""
     v = verdict_analyze(df, account=account, risk_pct=risk_pct)
     direction = 1 if v["verdict"] == "LONG" else (-1 if v["verdict"] == "SHORT" else 0)
@@ -58,6 +60,22 @@ def score_name(df: pd.DataFrame, account: float = 5000.0, risk_pct: float = 1.0,
             tilt += adj
             tilt_reasons.append(f"macro rate trend {macro_trend} ({adj:+.1f})")
 
+    if flow_confluence and direction != 0:
+        fc_verdict = flow_confluence.get("verdict")
+        agree = ((fc_verdict == "CONFLUENCE LONG" and direction == 1)
+                or (fc_verdict == "CONFLUENCE SHORT" and direction == -1))
+        disagree = ((fc_verdict == "CONFLUENCE LONG" and direction == -1)
+                   or (fc_verdict == "CONFLUENCE SHORT" and direction == 1)
+                   or fc_verdict == "CONFLICT")
+        if agree:
+            tilt += FLOW_CONFLUENCE_TILT_PTS
+            tilt_reasons.append(f"flow confluence {fc_verdict} agrees "
+                               f"({FLOW_CONFLUENCE_TILT_PTS:+.1f})")
+        elif disagree:
+            tilt -= FLOW_CONFLUENCE_TILT_PTS
+            tilt_reasons.append(f"flow confluence {fc_verdict} disagrees "
+                               f"({-FLOW_CONFLUENCE_TILT_PTS:+.1f})")
+
     target_score = round(min(max(v["conviction"] + tilt, 0), 100), 1)
     conflict = bool(tilt_reasons) and (tilt < 0) and direction != 0
 
@@ -76,12 +94,14 @@ def rank_sectors_and_names(data: dict[str, pd.DataFrame], sectors: dict[str, str
                           account: float = 5000.0, risk_pct: float = 1.0,
                           sentiment_by_ticker: dict | None = None,
                           flow_by_ticker: dict | None = None,
-                          macro_trend: str | None = None) -> dict:
+                          macro_trend: str | None = None,
+                          flow_confluence_by_ticker: dict | None = None) -> dict:
     """Rank sectors (by average target_score of their tradeable names),
     then names within each sector. NO TRADE verdicts and tilt-conflicted
     names go to `avoid` instead of the ranking."""
     sentiment_by_ticker = sentiment_by_ticker or {}
     flow_by_ticker = flow_by_ticker or {}
+    flow_confluence_by_ticker = flow_confluence_by_ticker or {}
     names, avoid = [], []
 
     for tkr, df in data.items():
@@ -90,7 +110,8 @@ def rank_sectors_and_names(data: dict[str, pd.DataFrame], sectors: dict[str, str
         try:
             s = score_name(df, account=account, risk_pct=risk_pct,
                           sentiment=sentiment_by_ticker.get(tkr),
-                          flow=flow_by_ticker.get(tkr), macro_trend=macro_trend)
+                          flow=flow_by_ticker.get(tkr), macro_trend=macro_trend,
+                          flow_confluence=flow_confluence_by_ticker.get(tkr))
         except Exception:
             continue
         s["ticker"] = tkr
