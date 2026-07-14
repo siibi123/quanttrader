@@ -497,6 +497,42 @@ with t_lab:
                            "expiries/strikes (or delta/type columns) for "
                            "skew, term-structure or smile reads.")
 
+    st.markdown("### 🎯 Sector & Target Scan")
+    if st.button("Scan sectors & targets", use_container_width=True):
+        with st.spinner("Scanning watchlist × verdict × tilts…"):
+            scan = orch.sector_scan(symbols, account=broker.equity(marks),
+                                    risk_pct=rp)
+        if not scan:
+            st.info("Not enough history on the watchlist symbols yet — "
+                    "each needs 220+ bars.")
+        else:
+            if scan["sectors"]:
+                st.markdown("**Ranked sectors**")
+                st.dataframe(pd.DataFrame(scan["sectors"]),
+                            use_container_width=True, hide_index=True)
+            if scan["names"]:
+                st.markdown("**Ranked names**")
+                rows = [{"ticker": n["ticker"], "sector": n["sector"],
+                        "verdict": n["verdict"], "target score": n["target_score"],
+                        "entry": n["entry"], "stop": n["stop"],
+                        "target": n["target"], "rr": n["rr"],
+                        "avoid above": n.get("avoid_above"),
+                        "avoid below": n.get("avoid_below"),
+                        "why": "; ".join(n["reasons_pro"][:2] + n["tilt_reasons"])}
+                       for n in scan["names"]]
+                st.dataframe(pd.DataFrame(rows), use_container_width=True,
+                            hide_index=True)
+            else:
+                st.caption("Nothing cleared a tradeable verdict today.")
+            if scan["avoid"]:
+                st.markdown("**Avoid**")
+                st.dataframe(pd.DataFrame(scan["avoid"]),
+                            use_container_width=True, hide_index=True)
+            st.caption("Suggestions only — nothing here executes a trade. "
+                       "Acting on any of these still goes through RUN "
+                       "DECISION CYCLE's propose → RiskEngine veto → "
+                       "PaperBroker → AuditLog chain.")
+
 with t_audit:
     st.markdown("### Audit timeline — trigger → model → reasoning")
     tail = audit.tail(20)

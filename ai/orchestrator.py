@@ -28,6 +28,7 @@ from data.providers import DataProvider, LSEProvider
 from quant.anomaly_library import match_anomalies
 from quant.playbook import build_playbook
 from quant.risk import correlation_heat, portfolio_var
+from quant.sector_engine import rank_sectors_and_names
 from quant.signals import BUY_TH, SELL_TH, composite, rsi
 from quant.surface_interpreter import interpret_surface
 from quant.verdict import MODELS
@@ -254,9 +255,14 @@ class RuleOrchestrator:
             df.columns = [str(c).lower() for c in df.columns]
             val_col = next((c for c in ("value", "close") if c in df.columns), None)
             dt_col = next((c for c in ("date", "timestamp") if c in df.columns), None)
-            if val_col:
-                out[s] = {"latest": float(df[val_col].iloc[0]),
-                          "as_of": str(df[dt_col].iloc[0]) if dt_col else ""}
+            if not val_col:
+                continue
+            latest = float(df[val_col].iloc[0])
+            prior = float(df[val_col].iloc[1]) if len(df) > 1 else None
+            trend = ("up" if prior is not None and latest > prior else
+                    "down" if prior is not None and latest < prior else "flat")
+            out[s] = {"latest": latest, "prior": prior, "trend": trend,
+                      "as_of": str(df[dt_col].iloc[0]) if dt_col else ""}
         cal = self._lse.economic_calendar(region="US", order="asc", limit=10)
         upcoming = []
         if len(cal):
@@ -313,6 +319,58 @@ class RuleOrchestrator:
                       f"${min_premium:,.0f} premium in the recent tape",
             data=out)
         self._bus.publish(Event("flow.interrupt", out, source="flow"))
+        return out
+
+    def sector_scan(self, symbols: list[str], account: float = 5000.0,
+                    risk_pct: float = 1.0) -> dict:
+        """Multi-factor sector/name ranking (quant.sector_engine): verdict's
+        technical conviction tilted by whatever news sentiment, large
+        option prints, and macro rate-trend readings are already cached in
+        state (from scan_news/scan_flow/scan_macro — this does not fetch
+        those itself). Sector comes from LSE company_profiles when the key
+        is set, else 'Unclassified' — never guessed."""
+        data = {s: self._provider.get_candles(s) for s in symbols}
+        data = {s: df for s, df in data.items() if len(df) >= 220}
+        if not data:
+            return {}
+
+        sectors = {}
+        if self._lse and self._lse.key:
+            for s in data:
+                prof = self._lse.company_profiles(symbol=s)
+                if len(prof):
+                    prof.columns = [str(c).lower() for c in prof.columns]
+                    if "sector" in prof.columns:
+                        sectors[s] = str(prof["sector"].iloc[0])
+
+        sentiment_by, flow_by = {}, {}
+        for s in data:
+            n = self._state.get(f"news.{s}")
+            if n and n.get("bullish_pct") is not None:
+                sentiment_by[s] = n
+            f = self._state.get(f"flow_alerts.{s}")
+            if f:
+                flow_by[s] = f
+
+        rate = (self._state.get("macro") or {}).get("fdtr") or {}
+        macro_trend = rate.get("trend")
+
+        out = rank_sectors_and_names(data, sectors, account=account,
+                                     risk_pct=risk_pct,
+                                     sentiment_by_ticker=sentiment_by,
+                                     flow_by_ticker=flow_by,
+                                     macro_trend=macro_trend)
+        self._state.set("sector_scan", out, source="research")
+        top_sec = out["sectors"][0]["sector"] if out["sectors"] else "none"
+        top_names = ", ".join(f"{n['ticker']} ({n['target_score']})"
+                              for n in out["names"][:3])
+        self._audit.record(
+            "Research", "SECTOR SCAN",
+            model="quant.sector_engine (verdict + sentiment/flow/macro tilts)",
+            reasoning=(f"Scanned {out['n_scanned']} names · top sector "
+                      f"{top_sec} · top names: {top_names or 'none tradeable'}"
+                      f" · {len(out['avoid'])} flagged to avoid"),
+            data=out)
         return out
 
     def ingest_chain(self, symbol: str, chain: pd.DataFrame) -> dict:

@@ -197,6 +197,14 @@ class LSEProvider(DataProvider):
                           "order": order, "limit": limit})
         return pd.DataFrame(rows) if isinstance(rows, list) else pd.DataFrame()
 
+    def company_profiles(self, symbol: str | None = None,
+                         limit: int = 5000) -> pd.DataFrame:
+        """Company reference profiles — sector, industry, description.
+        Verified from the official SDK's client.company_profiles()
+        (GET /ref/company_profiles)."""
+        rows = self._get("/ref/company_profiles", {"symbol": symbol, "limit": limit})
+        return pd.DataFrame(rows) if isinstance(rows, list) else pd.DataFrame()
+
     def options_flow(self, underlying: str | None = None,
                      type: str | None = None, min_premium: float | None = None,
                      max_dte: int | None = None, start: str | None = None,

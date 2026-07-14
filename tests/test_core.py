@@ -18,6 +18,7 @@ from quant.covariance import shrunk_covariance, min_variance_weights
 from quant.vol_surface import build_surface_grid
 from quant.surface_interpreter import interpret_surface
 from quant.anomaly_library import match_anomalies
+from quant.sector_engine import rank_sectors_and_names, score_name
 from data.news import NewsProvider
 
 results = []
@@ -341,6 +342,43 @@ check("scan_flow: large prints land in state.flow_alerts + publish an interrupt"
 _res4 = orch4.research("P4TEST")
 check("research: core EWMA/MC fields still present after anomaly wiring",
       {"ewma_ann_vol_pct", "p_up_20d_pct", "exp_move_20d"} <= set(_res4.keys()))
+
+# ---- 23. P5: sector_engine — score_name tilts + rank_sectors_and_names
+def _mk_df(mu, vol, n=300, seed=1):
+    rr_ = np.random.default_rng(seed)
+    close = 100 * np.exp(np.cumsum(rr_.normal(mu, vol, n)))
+    return pd.DataFrame({"Open": close, "High": close * 1.01, "Low": close * 0.99,
+                        "Close": close, "Volume": 1e6},
+                        index=pd.bdate_range("2024-01-01", periods=n))
+
+_strong_up = _mk_df(0.0025, 0.01, seed=1)
+_base = score_name(_strong_up)
+_tilted = score_name(_strong_up, sentiment={"bullish_pct": 90, "bearish_pct": 5},
+                    flow={"prints": [{"strike": 100}]}, macro_trend="down")
+check("sector_engine: bullish sentiment+flow+dovish macro all tilt score up "
+      "on a LONG verdict",
+      _base["verdict"] == "LONG" and _tilted["target_score"] > _base["target_score"])
+
+_data = {"AAA": _mk_df(0.0025, 0.01, seed=1), "BBB": _mk_df(0.0022, 0.011, seed=2),
+         "CCC": _mk_df(-0.0005, 0.02, seed=3)}
+_sectors5 = {"AAA": "Tech", "BBB": "Tech", "CCC": "Energy"}
+_scan = rank_sectors_and_names(_data, _sectors5,
+                               sentiment_by_ticker={"AAA": {"bullish_pct": 85,
+                                                            "bearish_pct": 5}},
+                               macro_trend="down")
+check("sector_engine: only tradeable names are ranked, the rest land in avoid",
+      len(_scan["names"]) + len(_scan["avoid"]) == 3
+      and all(n["verdict"] != "NO TRADE" for n in _scan["names"]))
+check("sector_engine: sectors are ranked by average target_score",
+      _scan["sectors"] == sorted(_scan["sectors"],
+                                 key=lambda x: -x["avg_target_score"]))
+
+# ---- 24. P5: RuleOrchestrator.sector_scan wires state + audit
+orch5 = RuleOrchestrator(bus, state, audit, risk, broker, FakeProvider())
+_scan5 = orch5.sector_scan(["P5A", "P5B"], account=10000, risk_pct=1.0)
+check("sector_scan: writes state.sector_scan and a SECTOR SCAN audit record",
+      state.get("sector_scan") is not None
+      and any(r["action"] == "SECTOR SCAN" for r in audit.tail(20)))
 
 print("\n" + "=" * 44)
 passed = sum(1 for _, ok in results if ok)
