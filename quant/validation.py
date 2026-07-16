@@ -93,6 +93,31 @@ def permutation_test(returns: pd.Series, n_perm: int = 500,
     }
 
 
+def bootstrap_mean_return(returns: pd.Series, n_boot: int = 1000,
+                          seed: int = 7) -> dict:
+    """90% CI on the MEAN of a sample of i.i.d. per-signal forward returns
+    (each observation independent, not a sequential equity curve — use
+    bootstrap_cagr for that). This is the right tool for "does this
+    strategy's average edge survive resampling", e.g. the P7a strategy-
+    promotion gate over settled forward-return signals."""
+    r = returns.dropna().values
+    if len(r) < 8:
+        return {"error": "Need at least 8 settled signals for a bootstrap."}
+    rng = np.random.default_rng(seed)
+    means = np.array([rng.choice(r, size=len(r), replace=True).mean()
+                     for _ in range(n_boot)])
+    lo, med, hi = np.percentile(means, [5, 50, 95])
+    return {
+        "mean_return_%": round(float(r.mean()) * 100, 2),
+        "CI90_low_%": round(float(lo) * 100, 2),
+        "CI90_high_%": round(float(hi) * 100, 2),
+        "excludes_zero": bool(lo > 0),
+        "verdict": ("✅ Edge survives resampling" if lo > 0 else
+                    "⚠️ CI straddles zero — edge unproven" if hi > 0 else
+                    "❌ Likely a negative edge"),
+    }
+
+
 def bootstrap_cagr(trade_pnls: pd.Series, starting: float = 5000.0,
                    n_boot: int = 1000, seed: int = 7) -> dict:
     """90% confidence interval on total return by resampling trades."""

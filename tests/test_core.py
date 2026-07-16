@@ -22,6 +22,8 @@ from quant.sector_engine import rank_sectors_and_names, score_name
 from quant.orderflow import bulk_volume_classification, cvd, vpin, volume_profile
 from quant.optionflow import flow_spike, largest_prints, premium_share
 from quant.flow_confluence import confluence
+from quant.validation import bootstrap_mean_return
+from core.strategy_registry import MIN_SIGNALS_TO_PROMOTE, StrategyRegistry
 from data.news import NewsProvider
 
 results = []
@@ -483,6 +485,79 @@ _disagree9 = score_name(_strong_up, flow_confluence={"verdict": "CONFLUENCE SHOR
 check("sector_engine: agreeing flow confluence raises target_score, "
       "disagreeing lowers it",
       _agree9["target_score"] > _base9["target_score"] > _disagree9["target_score"])
+
+# ---- 30. P7a: bootstrap_mean_return — honest CI on a per-signal edge sample
+_rng10 = np.random.default_rng(1)
+_pos_edge = pd.Series(_rng10.normal(0.02, 0.03, 40))
+_noisy_edge = pd.Series(_rng10.normal(0.0, 0.05, 40))
+check("validation: bootstrap_mean_return excludes zero for a clear positive edge",
+      bootstrap_mean_return(_pos_edge)["excludes_zero"])
+check("validation: bootstrap_mean_return does not exclude zero for a noisy sample",
+      not bootstrap_mean_return(_noisy_edge)["excludes_zero"])
+
+# ---- 31. P7a: StrategyRegistry — log/settle/promote lifecycle
+reg1 = StrategyRegistry(audit, path="runtime/test_registry_p7a.json")
+check("strategy_registry: starts every strategy in INCUBATION",
+      reg1.status("s1") == StrategyRegistry.STATUS_INCUBATION)
+for _ in range(MIN_SIGNALS_TO_PROMOTE + 5):
+    reg1.log_signal("s1", "AAA", "BUY", 100.0, horizon_days=10)
+for s in reg1._data["s1"]["signals"]:
+    s["ts"] = time.time() - 11 * 86400              # simulate elapsed horizon
+n_settled = reg1.settle_signals("s1", price_lookup=lambda sym: 106.0)  # +6% each
+check("strategy_registry: settle_signals marks due signals settled",
+      n_settled == MIN_SIGNALS_TO_PROMOTE + 5
+      and reg1.signal_counts("s1")["pending"] == 0)
+promo1 = reg1.evaluate_promotion("s1")
+check("strategy_registry: promotes INCUBATION -> PAPER on a clear settled edge",
+      promo1["decision"] == "PROMOTE"
+      and reg1.status("s1") == StrategyRegistry.STATUS_PAPER
+      and any(r["action"] == "PROMOTE" for r in audit.tail(20)))
+
+reg1.log_signal("s2", "BBB", "BUY", 100.0, horizon_days=10)
+promo2 = reg1.evaluate_promotion("s2")
+check("strategy_registry: holds in INCUBATION with too few settled signals",
+      promo2["decision"] == "NOT ENOUGH SIGNALS"
+      and reg1.status("s2") == StrategyRegistry.STATUS_INCUBATION)
+
+# ---- 32. P7a: RuleOrchestrator.step() enforces the gate; exits are never gated
+reg7 = StrategyRegistry(audit, path="runtime/test_registry_p7a_orch.json")
+orch7 = RuleOrchestrator(bus, state, audit, risk, broker, FakeProvider(),
+                         registry=reg7)
+orch7.analyze = lambda symbol, **kw: {
+    "symbol": symbol, "signal": "BUY", "price": 100.0, "shares": 5,
+    "why": "test forced buy", "urgency": "🟢 ACTIONABLE", "mode": "ENTRY",
+    "gates": "5/5"}
+f1 = orch7.step(["P7AENTRY"], risk_pct=1.0)
+check("step(): INCUBATION blocks a new BUY entry but still logs the signal",
+      len(f1) == 0 and "P7AENTRY" not in broker.positions
+      and any(r["action"] == "SIGNAL LOGGED (INCUBATION)"
+             for r in audit.tail(20)))
+
+broker.positions["P7AEXIT"] = {"qty": 10, "avg_price": 90.0}
+orch7.analyze = lambda symbol, **kw: {
+    "symbol": symbol, "signal": "SELL", "price": 95.0,
+    "why": "test forced sell", "urgency": "🟠 TODAY", "mode": "MANAGE",
+    "gates": "3/5"}
+f2 = orch7.step(["P7AEXIT"], risk_pct=1.0)
+check("step(): exits execute even while the strategy is in INCUBATION",
+      len(f2) == 1 and "P7AEXIT" not in broker.positions)
+
+for _ in range(MIN_SIGNALS_TO_PROMOTE + 5):
+    reg7.log_signal(orch7.STRATEGY_NAME, "SEED", "BUY", 100.0, horizon_days=10)
+for s in reg7._data[orch7.STRATEGY_NAME]["signals"]:
+    s["ts"] = time.time() - 11 * 86400
+reg7.settle_signals(orch7.STRATEGY_NAME, price_lookup=lambda sym: 106.0)
+reg7.evaluate_promotion(orch7.STRATEGY_NAME)
+check("step(): strategy promotes to PAPER after enough settled signals with an edge",
+      reg7.status(orch7.STRATEGY_NAME) == StrategyRegistry.STATUS_PAPER)
+
+orch7.analyze = lambda symbol, **kw: {
+    "symbol": symbol, "signal": "BUY", "price": 100.0, "shares": 5,
+    "why": "test forced buy after promotion", "urgency": "🟢 ACTIONABLE",
+    "mode": "ENTRY", "gates": "5/5"}
+f3 = orch7.step(["P7APROMO"], risk_pct=1.0)
+check("step(): once PAPER, new BUY entries execute normally",
+      len(f3) == 1 and "P7APROMO" in broker.positions)
 
 print("\n" + "=" * 44)
 passed = sum(1 for _, ok in results if ok)

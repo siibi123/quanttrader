@@ -23,6 +23,7 @@ import pandas as pd
 
 from core.engine import AuditLog, Order, PaperBroker, RiskEngine
 from core.state import Event, EventBus, GlobalState
+from core.strategy_registry import StrategyRegistry
 from data.news import NewsProvider
 from data.providers import DataProvider, LSEProvider
 from quant.anomaly_library import match_anomalies
@@ -68,15 +69,29 @@ class RuleOrchestrator:
     RSI2 < 10 (panic dip in uptrend) or 20>50 SMA cross freshness.
     Exit: RSI2 > 80, or position down more than 1.5*ATR from avg price.
     Sizing: risk-based, capped by RiskEngine anyway.
+
+    P7a mandatory gate: when a StrategyRegistry is wired in, every BUY/
+    SELL signal from this strategy is logged; NEW entries only execute
+    once the strategy is promoted PAPER (>= 30 settled signals, bootstrap
+    CI on forward returns excludes zero). Exits are never gated — closing
+    risk on an existing position is always allowed regardless of status.
     """
+
+    STRATEGY_NAME = "rule_v1_playbook_verdict"
 
     def __init__(self, bus: EventBus, state: GlobalState, audit: AuditLog,
                  risk: RiskEngine, broker: PaperBroker,
                  provider: DataProvider, news: NewsProvider | None = None,
-                 lse: LSEProvider | None = None):
+                 lse: LSEProvider | None = None,
+                 registry: StrategyRegistry | None = None):
         self._bus, self._state, self._audit = bus, state, audit
         self._risk, self._broker, self._provider = risk, broker, provider
         self._news, self._lse = news, lse
+        self._registry = registry
+
+    def _settle_price(self, symbol: str):
+        q = self._provider.get_quote(symbol)
+        return q.get("price") if q else None
 
     # ---- indicators (self-contained; QuantSignal engines port in later) --
     @staticmethod
@@ -469,6 +484,13 @@ class RuleOrchestrator:
         """One decision cycle over the watchlist. Returns executed fills."""
         fills = []
         prices_seen = {}
+        may_enter = True
+        if self._registry:
+            self._registry.settle_signals(self.STRATEGY_NAME, self._settle_price)
+            promo = self._registry.evaluate_promotion(self.STRATEGY_NAME)
+            may_enter = self._registry.status(self.STRATEGY_NAME) \
+                == StrategyRegistry.STATUS_PAPER
+
         for s in symbols:
             held_pos = self._broker.positions.get(s)
             eq0 = self._broker.equity(prices_seen)
@@ -478,7 +500,21 @@ class RuleOrchestrator:
             if price:
                 prices_seen[s] = price
             held = held_pos.get("qty", 0) if held_pos else 0
+
+            if sig["signal"] in ("BUY", "SELL") and self._registry and price > 0:
+                self._registry.log_signal(self.STRATEGY_NAME, s,
+                                          sig["signal"], price)
+
             if sig["signal"] == "BUY" and not held and price > 0:
+                if not may_enter:
+                    self._audit.record(
+                        "Orchestrator", "SIGNAL LOGGED (INCUBATION)",
+                        trigger=f"signals.{s}", model="rule-v1",
+                        reasoning=(f"{s}: BUY signal logged but NOT traded — "
+                                  f"strategy '{self.STRATEGY_NAME}' is still "
+                                  f"in INCUBATION (P7a promotion gate)"),
+                        data={"symbol": s, "signal": "BUY", "price": price})
+                    continue
                 qty = int(sig.get("shares") or 0)
                 if qty < 1:
                     continue
@@ -493,6 +529,7 @@ class RuleOrchestrator:
                     if f:
                         fills.append(f)
             elif sig["signal"] == "SELL" and held:
+                # exits are never gated by the promotion status
                 order = Order(s, "SELL", held, reason=sig["why"])
                 self._audit.record("Orchestrator", "PROPOSE SELL",
                                    trigger=f"signals.{s}", model="rule-v1",

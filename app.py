@@ -12,6 +12,7 @@ import streamlit as st
 from ai.orchestrator import RuleOrchestrator, TOOL_SCHEMAS
 from core.engine import AuditLog, PaperBroker, RiskEngine
 from core.state import Config, EventBus, GlobalState
+from core.strategy_registry import MIN_SIGNALS_TO_PROMOTE, StrategyRegistry
 from data.news import NewsProvider
 from data.providers import (CompositeProvider, LSEProvider, PollingFeed,
                             YahooProvider)
@@ -89,20 +90,22 @@ def get_engine():
     provider = CompositeProvider([lse, YahooProvider()], state)
     broker = PaperBroker(cfg, bus, state, audit)
     risk = RiskEngine(cfg, bus, state, audit)
+    registry = StrategyRegistry(audit)
     orch = RuleOrchestrator(bus, state, audit, risk, broker, provider,
-                            news=news, lse=lse)
+                            news=news, lse=lse, registry=registry)
     feed = PollingFeed(bus, state, provider,
                        ["SPY", "QQQ", "AAPL", "NVDA"], interval_s=45)
     state.set("session", {"started": time.strftime(
         "%Y-%m-%d %H:%M UTC", time.gmtime())})
     return dict(cfg=cfg, bus=bus, state=state, audit=audit, lse=lse,
                 news=news, provider=provider, broker=broker, risk=risk,
-                orch=orch, feed=feed)
+                registry=registry, orch=orch, feed=feed)
 
 
 E = get_engine()
 cfg, state, audit = E["cfg"], E["state"], E["audit"]
 broker, risk, orch, feed = E["broker"], E["risk"], E["orch"], E["feed"]
+registry = E["registry"]
 quotes = state.get("quotes") or {}
 
 # ---------------------------------------------------------------------------
@@ -167,6 +170,26 @@ with st.sidebar:
         st.caption(f"Daily loss halt · −{cfg.max_daily_loss_pct}%")
         st.caption(f"VaR ceiling · {cfg.max_var_pct}%")
         st.caption("⛔ RiskEngine veto: ABSOLUTE")
+    with st.expander("STRATEGY PROMOTION (P7a)", expanded=True):
+        strat_name = orch.STRATEGY_NAME
+        s_status = registry.status(strat_name)
+        counts = registry.signal_counts(strat_name)
+        if s_status == StrategyRegistry.STATUS_PAPER:
+            st.caption(f"🟢 PAPER — {strat_name}")
+            st.caption("Promoted: entries execute normally.")
+        else:
+            st.caption(f"🔬 INCUBATION — {strat_name}")
+            st.caption(f"{counts['settled']}/{MIN_SIGNALS_TO_PROMOTE} settled "
+                       f"signals needed · new entries held back, signals "
+                       f"still logged")
+        st.caption(f"Signals: {counts['total']} total · {counts['settled']} "
+                   f"settled · {counts['pending']} pending")
+        last_val = registry.last_validation(strat_name)
+        if last_val.get("decision") not in (None, "NOT ENOUGH SIGNALS"):
+            bc = last_val.get("bootstrap", {})
+            st.caption(f"Last eval: {last_val['decision']} · bootstrap CI "
+                       f"[{bc.get('CI90_low_%', '—')}%, "
+                       f"{bc.get('CI90_high_%', '—')}%]")
     with st.expander("DATA CHAIN", expanded=False):
         if cfg.lse_api_key:
             st.caption("🟢 LSE vault (verified contract) → Yahoo failsafe")
