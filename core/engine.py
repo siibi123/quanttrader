@@ -77,8 +77,9 @@ class RiskEngine:
     """Holds veto power over every order and every risky state change."""
 
     def __init__(self, cfg: Config, bus: EventBus, state: GlobalState,
-                 audit: AuditLog):
+                 audit: AuditLog, circuit_breaker=None):
         self.cfg, self._bus, self._state, self._audit = cfg, bus, state, audit
+        self._circuit_breaker = circuit_breaker
 
     # ---- live metrics -----------------------------------------------------
     def parametric_var(self, positions: dict, returns: dict[str, pd.Series],
@@ -126,6 +127,17 @@ class RiskEngine:
             checks.append((pos_after <= cap_usd,
                            f"max position size — {cap_label} "
                            f"(position would be ${pos_after:,.0f})"))
+            if self._circuit_breaker is not None:
+                cb = self._circuit_breaker.update(eq)
+                checks.append((
+                    not cb["halted"],
+                    f"drawdown circuit breaker HALTED at "
+                    f"{cb['drawdown_pct']}% from peak — needs a manual "
+                    f"owner reset with a reason"))
+                checks.append((
+                    not cb["only_risk_reducing"],
+                    f"drawdown circuit breaker: {cb['drawdown_pct']}% from "
+                    f"peak — only risk-reducing orders allowed"))
         daily = broker.daily_pnl_pct({order.ticker: price})
         checks.append((daily > -self.cfg.max_daily_loss_pct or
                        order.side == "SELL",

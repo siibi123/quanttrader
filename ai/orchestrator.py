@@ -83,11 +83,13 @@ class RuleOrchestrator:
                  risk: RiskEngine, broker: PaperBroker,
                  provider: DataProvider, news: NewsProvider | None = None,
                  lse: LSEProvider | None = None,
-                 registry: StrategyRegistry | None = None):
+                 registry: StrategyRegistry | None = None,
+                 circuit_breaker=None):
         self._bus, self._state, self._audit = bus, state, audit
         self._risk, self._broker, self._provider = risk, broker, provider
         self._news, self._lse = news, lse
         self._registry = registry
+        self._circuit_breaker = circuit_breaker
 
     def _settle_price(self, symbol: str):
         q = self._provider.get_quote(symbol)
@@ -487,9 +489,18 @@ class RuleOrchestrator:
         may_enter = True
         if self._registry:
             self._registry.settle_signals(self.STRATEGY_NAME, self._settle_price)
-            promo = self._registry.evaluate_promotion(self.STRATEGY_NAME)
+            self._registry.evaluate_promotion(self.STRATEGY_NAME)
             may_enter = self._registry.status(self.STRATEGY_NAME) \
                 == StrategyRegistry.STATUS_PAPER
+
+        cb = None
+        if self._circuit_breaker:
+            marks = {t: (self._state.get(f"quotes.{t}") or {}).get(
+                        "price", p["avg_price"])
+                    for t, p in self._broker.positions.items()}
+            eq_now = self._broker.equity(marks)
+            if eq_now > 0:
+                cb = self._circuit_breaker.update(eq_now)
 
         for s in symbols:
             held_pos = self._broker.positions.get(s)
@@ -515,7 +526,20 @@ class RuleOrchestrator:
                                   f"in INCUBATION (P7a promotion gate)"),
                         data={"symbol": s, "signal": "BUY", "price": price})
                     continue
+                if cb and (cb["halted"] or cb["only_risk_reducing"]):
+                    self._audit.record(
+                        "Orchestrator", "SIGNAL LOGGED (CIRCUIT BREAKER)",
+                        trigger=f"signals.{s}", model="rule-v1",
+                        reasoning=(f"{s}: BUY signal logged but NOT traded "
+                                  f"— drawdown circuit breaker at "
+                                  f"{cb['drawdown_pct']}% from peak "
+                                  f"({'HALTED, needs manual reset' if cb['halted'] else 'risk-reducing trades only'})"),
+                        data={"symbol": s, "signal": "BUY", "price": price,
+                             "circuit_breaker": cb})
+                    continue
                 qty = int(sig.get("shares") or 0)
+                if cb and cb["size_multiplier"] < 1.0:
+                    qty = int(qty * cb["size_multiplier"])
                 if qty < 1:
                     continue
                 order = Order(s, "BUY", qty, reason=sig["why"])

@@ -24,6 +24,7 @@ from quant.optionflow import flow_spike, largest_prints, premium_share
 from quant.flow_confluence import confluence
 from quant.validation import bootstrap_mean_return
 from core.strategy_registry import MIN_SIGNALS_TO_PROMOTE, StrategyRegistry
+from core.circuit_breaker import DrawdownCircuitBreaker
 from data.news import NewsProvider
 
 results = []
@@ -558,6 +559,72 @@ orch7.analyze = lambda symbol, **kw: {
 f3 = orch7.step(["P7APROMO"], risk_pct=1.0)
 check("step(): once PAPER, new BUY entries execute normally",
       len(f3) == 1 and "P7APROMO" in broker.positions)
+
+# ---- 33. P7e: DrawdownCircuitBreaker — multiplier curve + peak/halt lifecycle
+check("circuit_breaker: gradual multiplier (1.0 -> 0.5 -> 0.0 across 0-10% DD)",
+      DrawdownCircuitBreaker._multiplier(0) == 1.0
+      and DrawdownCircuitBreaker._multiplier(5) == 0.5
+      and DrawdownCircuitBreaker._multiplier(10) == 0.0
+      and DrawdownCircuitBreaker._multiplier(2.5) == 0.75)
+
+cb1 = DrawdownCircuitBreaker(audit, path="runtime/test_cb1.json")
+s1 = cb1.update(10000)                 # first mark sets the peak
+check("circuit_breaker: first update establishes the peak with no drawdown",
+      s1["peak_equity"] == 10000 and s1["drawdown_pct"] == 0.0
+      and s1["size_multiplier"] == 1.0)
+s2 = cb1.update(9500)                  # 5% drawdown -> half size
+check("circuit_breaker: 5% drawdown cuts size toward 50%",
+      abs(s2["drawdown_pct"] - 5.0) < 0.01 and abs(s2["size_multiplier"] - 0.5) < 0.01)
+s3 = cb1.update(8800)                  # 12% drawdown -> risk-reducing only
+check("circuit_breaker: 10-15% drawdown allows only risk-reducing trades",
+      s3["only_risk_reducing"] and not s3["halted"])
+s4 = cb1.update(8400)                  # 16% drawdown -> hard halt, audited
+check("circuit_breaker: >=15% drawdown trips a sticky HALT",
+      s4["halted"]
+      and any(r["action"] == "CIRCUIT BREAKER TRIPPED" for r in audit.tail(20)))
+s5 = cb1.update(10000)                 # equity fully recovers to the old peak
+check("circuit_breaker: a halt does NOT auto-clear just because equity recovers",
+      cb1.status()["halted"])
+try:
+    cb1.manual_reset("")
+    check("circuit_breaker: manual_reset rejects an empty reason", False)
+except ValueError:
+    check("circuit_breaker: manual_reset rejects an empty reason", True)
+cb1.manual_reset("owner reviewed the drawdown, resuming manually")
+check("circuit_breaker: a reasoned manual_reset clears the halt and is audited",
+      not cb1.status()["halted"]
+      and any(r["action"] == "CIRCUIT BREAKER RESET" for r in audit.tail(20)))
+
+# ---- 34. P7e: RiskEngine defense-in-depth veto when the breaker is tripped
+cb2 = DrawdownCircuitBreaker(audit, path="runtime/test_cb2.json")
+cb2._data["peak_equity"] = 20000.0     # fabricate a high peak -> instant big drawdown
+broker3 = PaperBroker(cfg, bus, state, audit, path="runtime/test_broker_cb.json")
+risk3 = RiskEngine(cfg, bus, state, audit, circuit_breaker=cb2)
+halted_buy = risk3.review(Order("HALT", "BUY", 1, reason="test"), broker3, 100.0)
+check("risk: vetoes a BUY when the circuit breaker is HALTED",
+      not halted_buy.approved and "circuit breaker" in halted_buy.veto_reason.lower())
+halted_sell = risk3.review(Order("HALT", "SELL", 1, reason="test"), broker3, 100.0)
+check("risk: circuit breaker checks never apply to SELL (exits stay unblocked)",
+      halted_sell.approved)
+
+# ---- 35. P7e: RuleOrchestrator.step() applies the size multiplier to real orders
+# step() derives equity from the broker's OWN balance each call, so the
+# drawdown must be simulated there, not via a disconnected update() call.
+cb3 = DrawdownCircuitBreaker(audit, path="runtime/test_cb3.json")
+cb3.update(10000)                      # establish the peak
+broker4 = PaperBroker(cfg, bus, state, audit, path="runtime/test_broker_cb2.json")
+broker4.cash = 9500.0                  # simulate a 5% drawdown in the broker's own equity
+broker4.day_start_equity = 9500.0      # keep the (unrelated) daily-loss check from also firing
+risk4 = RiskEngine(cfg, bus, state, audit, circuit_breaker=cb3)
+orch8 = RuleOrchestrator(bus, state, audit, risk4, broker4, FakeProvider(),
+                         circuit_breaker=cb3)
+orch8.analyze = lambda symbol, **kw: {
+    "symbol": symbol, "signal": "BUY", "price": 100.0, "shares": 10,
+    "why": "test circuit breaker sizing", "urgency": "🟢 ACTIONABLE",
+    "mode": "ENTRY", "gates": "5/5"}
+orch8.step(["CBSIZE"], risk_pct=1.0)
+check("step(): a 5% drawdown roughly halves the executed order size",
+      "CBSIZE" in broker4.positions and broker4.positions["CBSIZE"]["qty"] == 5)
 
 print("\n" + "=" * 44)
 passed = sum(1 for _, ok in results if ok)

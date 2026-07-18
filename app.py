@@ -12,6 +12,7 @@ import streamlit as st
 from ai.orchestrator import RuleOrchestrator, TOOL_SCHEMAS
 from core.engine import AuditLog, PaperBroker, RiskEngine
 from core.state import Config, EventBus, GlobalState
+from core.circuit_breaker import DrawdownCircuitBreaker
 from core.strategy_registry import MIN_SIGNALS_TO_PROMOTE, StrategyRegistry
 from data.news import NewsProvider
 from data.providers import (CompositeProvider, LSEProvider, PollingFeed,
@@ -89,23 +90,27 @@ def get_engine():
     news = NewsProvider(cfg.news_api_key)
     provider = CompositeProvider([lse, YahooProvider()], state)
     broker = PaperBroker(cfg, bus, state, audit)
-    risk = RiskEngine(cfg, bus, state, audit)
+    circuit_breaker = DrawdownCircuitBreaker(audit)
+    risk = RiskEngine(cfg, bus, state, audit, circuit_breaker=circuit_breaker)
     registry = StrategyRegistry(audit)
     orch = RuleOrchestrator(bus, state, audit, risk, broker, provider,
-                            news=news, lse=lse, registry=registry)
+                            news=news, lse=lse, registry=registry,
+                            circuit_breaker=circuit_breaker)
     feed = PollingFeed(bus, state, provider,
                        ["SPY", "QQQ", "AAPL", "NVDA"], interval_s=45)
     state.set("session", {"started": time.strftime(
         "%Y-%m-%d %H:%M UTC", time.gmtime())})
     return dict(cfg=cfg, bus=bus, state=state, audit=audit, lse=lse,
                 news=news, provider=provider, broker=broker, risk=risk,
-                registry=registry, orch=orch, feed=feed)
+                registry=registry, circuit_breaker=circuit_breaker,
+                orch=orch, feed=feed)
 
 
 E = get_engine()
 cfg, state, audit = E["cfg"], E["state"], E["audit"]
 broker, risk, orch, feed = E["broker"], E["risk"], E["orch"], E["feed"]
 registry = E["registry"]
+circuit_breaker = E["circuit_breaker"]
 quotes = state.get("quotes") or {}
 
 # ---------------------------------------------------------------------------
@@ -190,6 +195,30 @@ with st.sidebar:
             st.caption(f"Last eval: {last_val['decision']} · bootstrap CI "
                        f"[{bc.get('CI90_low_%', '—')}%, "
                        f"{bc.get('CI90_high_%', '—')}%]")
+    with st.expander("DRAWDOWN CIRCUIT BREAKER (P7e)", expanded=True):
+        cbs = circuit_breaker.status()
+        dd = cbs.get("drawdown_pct", 0.0)
+        if cbs.get("halted"):
+            st.caption(f"🔴 HALTED — {dd}% drawdown from peak "
+                       f"${cbs.get('peak_equity', 0):,.0f}")
+            st.caption("New entries blocked until a manual reset. "
+                       "Existing positions can still be exited.")
+            reset_reason = st.text_input(
+                "Reason for reset (required)", key="cb_reset_reason")
+            if st.button("Reset circuit breaker", use_container_width=True):
+                if reset_reason.strip():
+                    circuit_breaker.manual_reset(reset_reason)
+                    st.rerun()
+                else:
+                    st.warning("A written reason is required to reset.")
+        else:
+            badge = ("🟡" if cbs.get("only_risk_reducing") else
+                     "🟠" if cbs.get("size_multiplier", 1.0) < 1.0 else "🟢")
+            st.caption(f"{badge} {dd}% drawdown from peak "
+                       f"${cbs.get('peak_equity', 0):,.0f}")
+            st.caption(f"Size multiplier: {cbs.get('size_multiplier', 1.0):.0%}"
+                       + (" · risk-reducing only"
+                          if cbs.get("only_risk_reducing") else ""))
     with st.expander("DATA CHAIN", expanded=False):
         if cfg.lse_api_key:
             st.caption("🟢 LSE vault (verified contract) → Yahoo failsafe")
