@@ -33,6 +33,7 @@ from quant.risk import correlation_heat, portfolio_var
 from quant.sector_engine import rank_sectors_and_names
 from quant.signals import BUY_TH, SELL_TH, composite, rsi
 from quant.surface_interpreter import interpret_surface
+from quant.transaction_costs import expected_trade_cost
 from quant.verdict import MODELS
 from quant.verdict import analyze as qs_verdict
 
@@ -94,6 +95,26 @@ class RuleOrchestrator:
     def _settle_price(self, symbol: str):
         q = self._provider.get_quote(symbol)
         return q.get("price") if q else None
+
+    def _cost_and_edge(self, symbol: str, qty: int, price: float,
+                       equity: float, risk_pct: float, side: str) -> dict:
+        """P7b: expected transaction cost (spread + sqrt market impact),
+        and — for BUY only — the expected edge (% move to target from
+        quant.verdict.analyze(), a simplification, not a full
+        probability-weighted EV) so RiskEngine can gate edge < 2x cost."""
+        df = self._provider.get_candles(symbol)
+        if len(df) < 30:
+            return {}
+        cost = expected_trade_cost(df, qty, price)
+        out = {"cost": cost}
+        if side == "BUY":
+            try:
+                v = qs_verdict(df, account=equity, risk_pct=risk_pct)
+                out["edge_pct"] = round(
+                    abs(v["target"] / v["entry"] - 1) * 100, 3)
+            except Exception:
+                pass
+        return out
 
     # ---- indicators (self-contained; QuantSignal engines port in later) --
     @staticmethod
@@ -543,11 +564,23 @@ class RuleOrchestrator:
                 if qty < 1:
                     continue
                 order = Order(s, "BUY", qty, reason=sig["why"])
+                ce = self._cost_and_edge(s, qty, price, eq0, risk_pct, "BUY")
+                cost_note = ""
+                if ce.get("cost"):
+                    c = ce["cost"]
+                    cost_note = (f" · expected cost {c['expected_cost_pct']}% "
+                                f"(${c['expected_cost_$']:,.2f}) vs expected "
+                                f"edge {ce.get('edge_pct', '—')}%")
                 self._audit.record("Orchestrator", "PROPOSE BUY",
                                    trigger=f"signals.{s}", model="rule-v1",
-                                   reasoning=sig["why"],
-                                   data={"qty": qty, "price": price})
-                order = self._risk.review(order, self._broker, price)
+                                   reasoning=sig["why"] + cost_note,
+                                   data={"qty": qty, "price": price, **ce})
+                order = self._risk.review(order, self._broker, price,
+                                          cost_info={
+                                              "expected_cost_pct":
+                                                  ce.get("cost", {}).get("expected_cost_pct"),
+                                              "expected_edge_pct": ce.get("edge_pct")}
+                                          if ce.get("cost") else None)
                 if order.approved:
                     f = self._broker.execute(order, price)
                     if f:
@@ -555,9 +588,16 @@ class RuleOrchestrator:
             elif sig["signal"] == "SELL" and held:
                 # exits are never gated by the promotion status
                 order = Order(s, "SELL", held, reason=sig["why"])
+                ce = self._cost_and_edge(s, held, price, eq0, risk_pct, "SELL")
+                cost_note = ""
+                if ce.get("cost"):
+                    c = ce["cost"]
+                    cost_note = (f" · expected cost {c['expected_cost_pct']}% "
+                                f"(${c['expected_cost_$']:,.2f})")
                 self._audit.record("Orchestrator", "PROPOSE SELL",
                                    trigger=f"signals.{s}", model="rule-v1",
-                                   reasoning=sig["why"], data={"qty": held})
+                                   reasoning=sig["why"] + cost_note,
+                                   data={"qty": held, **ce})
                 order = self._risk.review(order, self._broker, price)
                 if order.approved:
                     f = self._broker.execute(order, price)

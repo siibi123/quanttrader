@@ -98,8 +98,8 @@ class RiskEngine:
 
     # ---- the veto ----------------------------------------------------------
     def review(self, order: Order, broker: "PaperBroker",
-               price: float, returns: dict[str, pd.Series] | None = None
-               ) -> Order:
+               price: float, returns: dict[str, pd.Series] | None = None,
+               cost_info: dict | None = None) -> Order:
         eq = broker.equity({order.ticker: price})
         checks: list[tuple[bool, str]] = []
 
@@ -127,6 +127,15 @@ class RiskEngine:
             checks.append((pos_after <= cap_usd,
                            f"max position size — {cap_label} "
                            f"(position would be ${pos_after:,.0f})"))
+            if cost_info:
+                edge = cost_info.get("expected_edge_pct")
+                cost = cost_info.get("expected_cost_pct")
+                if edge is not None and cost is not None:
+                    checks.append((
+                        edge >= 2 * cost,
+                        f"expected edge {edge:.2f}% must be >= 2x expected "
+                        f"cost {cost:.2f}% (needs >= {2 * cost:.2f}%) — "
+                        f"P7b transaction cost gate"))
             if self._circuit_breaker is not None:
                 cb = self._circuit_breaker.update(eq)
                 checks.append((

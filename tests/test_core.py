@@ -25,6 +25,7 @@ from quant.flow_confluence import confluence
 from quant.validation import bootstrap_mean_return
 from core.strategy_registry import MIN_SIGNALS_TO_PROMOTE, StrategyRegistry
 from core.circuit_breaker import DrawdownCircuitBreaker
+from quant.transaction_costs import corwin_schultz_spread, expected_trade_cost
 from data.news import NewsProvider
 
 results = []
@@ -625,6 +626,50 @@ orch8.analyze = lambda symbol, **kw: {
 orch8.step(["CBSIZE"], risk_pct=1.0)
 check("step(): a 5% drawdown roughly halves the executed order size",
       "CBSIZE" in broker4.positions and broker4.positions["CBSIZE"]["qty"] == 5)
+
+# ---- 36. P7b: transaction cost model — spread estimate + square-root impact
+_rng11 = np.random.default_rng(4)
+_n11 = 100
+_close11 = 100 * np.exp(np.cumsum(_rng11.normal(0.0005, 0.01, _n11)))
+_vol11 = np.full(_n11, 500000.0)
+_idx11 = pd.bdate_range("2024-01-01", periods=_n11)
+_df_wide = pd.DataFrame({"Open": _close11, "High": _close11 * 1.02,
+                        "Low": _close11 * 0.98, "Close": _close11,
+                        "Volume": _vol11}, index=_idx11)
+_df_tight = pd.DataFrame({"Open": _close11, "High": _close11 * 1.002,
+                         "Low": _close11 * 0.998, "Close": _close11,
+                         "Volume": _vol11}, index=_idx11)
+check("transaction_costs: wider daily ranges estimate a bigger spread",
+      corwin_schultz_spread(_df_wide) > corwin_schultz_spread(_df_tight))
+_cost_small = expected_trade_cost(_df_tight, order_shares=100,
+                                  price=float(_close11[-1]))
+_cost_big = expected_trade_cost(_df_tight, order_shares=200000,
+                                price=float(_close11[-1]))
+check("transaction_costs: a much bigger order costs more (sqrt market impact)",
+      _cost_big["expected_cost_pct"] > _cost_small["expected_cost_pct"])
+
+# ---- 37. P7b: RiskEngine gates BUY entries on edge < 2x expected cost
+risk5 = RiskEngine(cfg, bus, state, audit)
+low_edge = risk5.review(Order("EDGETEST", "BUY", 5, reason="test"), broker, 100.0,
+                        cost_info={"expected_cost_pct": 1.0, "expected_edge_pct": 1.5})
+check("risk: vetoes a BUY when expected edge < 2x expected cost",
+      not low_edge.approved and "expected edge" in low_edge.veto_reason)
+good_edge = risk5.review(Order("EDGETEST2", "BUY", 5, reason="test"), broker, 100.0,
+                         cost_info={"expected_cost_pct": 1.0, "expected_edge_pct": 3.0})
+check("risk: approves a BUY when expected edge >= 2x expected cost",
+      good_edge.approved)
+
+# ---- 38. P7b: RuleOrchestrator.step() shows expected cost on every proposal
+orch9 = RuleOrchestrator(bus, state, audit, risk, broker, FakeProvider())
+orch9.analyze = lambda symbol, **kw: {
+    "symbol": symbol, "signal": "BUY", "price": 100.0, "shares": 5,
+    "why": "test cost display", "urgency": "🟢 ACTIONABLE", "mode": "ENTRY",
+    "gates": "5/5"}
+orch9.step(["P7BCOST"], risk_pct=1.0)
+propose_recs = [r for r in audit.tail(30) if r["action"] == "PROPOSE BUY"
+               and r.get("trigger") == "signals.P7BCOST"]
+check("step(): PROPOSE BUY audit record shows expected cost",
+      len(propose_recs) == 1 and "expected cost" in propose_recs[0]["reasoning"])
 
 print("\n" + "=" * 44)
 passed = sum(1 for _, ok in results if ok)
