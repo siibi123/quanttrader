@@ -31,6 +31,7 @@ from quant.flow_confluence import confluence
 from quant.playbook import build_playbook
 from quant.correlation_monitor import CORRELATION_POLICY, correlation_regime
 from quant.execution_quality import slippage_report
+from quant.portfolio_stress import risk_budget_from_stress, simulate_portfolio
 from quant.regime_gate import REGIME_POLICY, classify_regime
 from quant.risk import correlation_heat, portfolio_var
 from quant.sector_engine import rank_sectors_and_names
@@ -466,6 +467,47 @@ class RuleOrchestrator:
                 data={"vpin_percentile": out.get("vpin_percentile")})
         return out
 
+    def stress_test(self, horizon_days: int = 21, n_paths: int = 10_000) -> dict:
+        """P7g: 10,000 correlated Monte Carlo paths of the CURRENT book
+        (Ledoit-Wolf covariance, not independent per-symbol sims) ->
+        state.portfolio_stress + audit. On-demand (no scheduler exists
+        yet for genuine weekly automation — this is meant to be run
+        about that often). Its result is cached and read by step() every
+        cycle afterward to size next week's entries, until the next run
+        replaces it — this is the "feed into next week's risk budget"
+        mechanism."""
+        pos = self._broker.positions
+        if len(pos) < 1:
+            return {"error": "no open positions to stress test"}
+        rets, dollars = {}, {}
+        marks = {t: (self._state.get(f"quotes.{t}") or {}).get(
+                    "price", p["avg_price"]) for t, p in pos.items()}
+        for t, p in pos.items():
+            df = self._provider.get_candles(t)
+            if len(df) >= 30:
+                rets[t] = df["Close"].pct_change().dropna()
+                dollars[t] = p["qty"] * marks.get(t, p["avg_price"])
+        out = simulate_portfolio(rets, dollars, horizon_days=horizon_days,
+                                 n_paths=n_paths)
+        if "error" in out:
+            return out
+        budget = risk_budget_from_stress(out)
+        out["risk_budget"] = budget
+        self._state.set("portfolio_stress", out, source="risk")
+        self._audit.record(
+            "RiskEngine", "PORTFOLIO STRESS TEST",
+            model=f"Monte Carlo, {n_paths:,} correlated paths, "
+                 f"{horizon_days}d horizon",
+            reasoning=(f"P(10% DD next {horizon_days}d) "
+                      f"{out['p_10pct_drawdown_%']}% · expected worst week "
+                      f"{out.get('expected_worst_week_%', '—')}% · 95% VaR "
+                      f"${out['var95_$']:,.0f}"
+                      + (" · ELEVATED RISK — next week's new-entry size "
+                         "cut to 50%" if budget["elevated_risk"] else
+                         " · risk budget normal")),
+            data=out)
+        return out
+
     def execution_quality_report(self, lookback_days: int = 7) -> dict:
         """P7d: slippage-vs-decision-price report over recent fills ->
         state.execution_quality + audit. Honestly empty if there's
@@ -610,6 +652,8 @@ class RuleOrchestrator:
 
         corr_pol = self.correlation_monitor().get(
             "policy", CORRELATION_POLICY["normal"])
+        stress_budget = (self._state.get("portfolio_stress.risk_budget")
+                        or {"size_multiplier": 1.0, "elevated_risk": False})
 
         for s in symbols:
             held_pos = self._broker.positions.get(s)
@@ -685,6 +729,8 @@ class RuleOrchestrator:
                     qty = int(qty * pol["size_multiplier"])
                 if corr_pol["size_multiplier"] < 1.0:
                     qty = int(qty * corr_pol["size_multiplier"])
+                if stress_budget["size_multiplier"] < 1.0:
+                    qty = int(qty * stress_budget["size_multiplier"])
                 if cb and cb["size_multiplier"] < 1.0:
                     qty = int(qty * cb["size_multiplier"])
                 if qty < 1:

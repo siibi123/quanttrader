@@ -697,6 +697,32 @@ with t_lab:
                        "fixed value until the broker's slippage model "
                        "itself becomes more realistic.")
 
+    st.markdown("### 🎲 Portfolio Stress Test (P7g)")
+    if st.button("Run Monte Carlo stress test (10,000 paths)",
+                use_container_width=True):
+        with st.spinner("Simulating 10,000 correlated paths of the book…"):
+            stress = orch.stress_test()
+        if "error" in stress:
+            st.info(stress["error"])
+        else:
+            m1, m2, m3 = st.columns(3)
+            m1.metric("P(10% DD next month)", f"{stress['p_10pct_drawdown_%']}%")
+            m2.metric("Expected worst week",
+                      f"{stress.get('expected_worst_week_%', '—')}%")
+            m3.metric("95% VaR", f"${stress['var95_$']:,.0f}")
+            budget = stress["risk_budget"]
+            if budget["elevated_risk"]:
+                st.warning("⚠️ Elevated risk — new-entry size cut to 50% "
+                          "until the next stress test run.")
+            else:
+                st.caption("Risk budget normal — full new-entry sizing.")
+            st.caption(f"{stress['n_paths']:,} paths · {stress['horizon_days']}d "
+                       f"horizon · starting value ${stress['starting_value_$']:,.0f} "
+                       f"· 95% CVaR ${stress['cvar95_$']:,.0f}")
+            st.caption("Feeds into RUN DECISION CYCLE automatically: this "
+                       "result is cached and applied to every new entry's "
+                       "sizing until the next time this test runs.")
+
 with t_audit:
     st.markdown("### Audit timeline — trigger → model → reasoning")
     tail = audit.tail(20)

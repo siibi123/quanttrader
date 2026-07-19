@@ -29,6 +29,7 @@ from quant.transaction_costs import corwin_schultz_spread, expected_trade_cost
 from quant.regime_gate import REGIME_POLICY, classify_regime
 from quant.execution_quality import slippage_report
 from quant.correlation_monitor import CORRELATION_POLICY, correlation_regime
+from quant.portfolio_stress import risk_budget_from_stress, simulate_portfolio
 from data.news import NewsProvider
 
 results = []
@@ -823,6 +824,61 @@ check("step(): a correlation regime ALERT blocks a new BUY entry",
       "P7FALERT" not in broker6.positions
       and any(r["action"] == "SIGNAL LOGGED (CORRELATION ALERT)"
              for r in audit.tail(20)))
+
+# ---- 48. P7g: portfolio_stress — correlated MC sim + risk budget feed
+_rng14 = np.random.default_rng(3)
+_n14 = 300
+_idx14 = pd.bdate_range("2024-01-01", periods=_n14)
+_common14 = _rng14.normal(0.0003, 0.015, _n14)
+_a14 = _common14 + _rng14.normal(0, 0.003, _n14)
+_b14 = _common14 + _rng14.normal(0, 0.003, _n14)      # highly correlated with A
+_c14 = _rng14.normal(0.0003, 0.015, _n14)             # independent of A
+
+_rets_corr14 = {"A": pd.Series(_a14, index=_idx14), "B": pd.Series(_b14, index=_idx14)}
+_rets_div14 = {"A": pd.Series(_a14, index=_idx14), "C": pd.Series(_c14, index=_idx14)}
+_dollars14 = {"A": 5000.0, "B": 5000.0}
+_dollars_div14 = {"A": 5000.0, "C": 5000.0}
+
+_stress_corr = simulate_portfolio(_rets_corr14, _dollars14, horizon_days=21,
+                                  n_paths=5000)
+_stress_div = simulate_portfolio(_rets_div14, _dollars_div14, horizon_days=21,
+                                 n_paths=5000)
+check("portfolio_stress: a correlated book shows higher P(10% DD) than a "
+      "diversified one with the same dollar exposure",
+      _stress_corr["p_10pct_drawdown_%"] > _stress_div["p_10pct_drawdown_%"])
+
+_bad_book = simulate_portfolio(
+    {"A": pd.Series(_rng14.normal(-0.001, 0.035, _n14), index=_idx14)},
+    {"A": 10000.0}, horizon_days=21, n_paths=5000)
+check("portfolio_stress: risk_budget_from_stress cuts size on elevated risk",
+      risk_budget_from_stress(_bad_book)["elevated_risk"]
+      and risk_budget_from_stress(_bad_book)["size_multiplier"] == 0.5)
+check("portfolio_stress: risk_budget_from_stress stays normal otherwise",
+      not risk_budget_from_stress(_stress_div)["elevated_risk"])
+
+# ---- 49. P7g: RuleOrchestrator.stress_test() wiring + step() risk-budget feed
+broker7 = PaperBroker(cfg, bus, state, audit, path="runtime/test_broker_p7g.json")
+orch13 = RuleOrchestrator(bus, state, audit, risk, broker7, FakeProvider())
+check("stress_test(): honest error with no open positions",
+      "error" in orch13.stress_test())
+
+broker7.positions["P7GPOS"] = {"qty": 10, "avg_price": 100.0}
+st_out = orch13.stress_test(horizon_days=21, n_paths=2000)
+check("stress_test(): writes state.portfolio_stress + an audit record",
+      "error" not in st_out and state.get("portfolio_stress") is not None
+      and any(r["action"] == "PORTFOLIO STRESS TEST" for r in audit.tail(20)))
+
+state.set("portfolio_stress.risk_budget",
+         {"size_multiplier": 0.5, "elevated_risk": True})
+orch13._regime_gate = lambda symbol: {"regime": "Bull",
+                                      "policy": REGIME_POLICY["Bull"]}
+orch13.correlation_monitor = lambda: {"policy": CORRELATION_POLICY["normal"]}
+orch13.analyze = lambda symbol, **kw: {
+    "symbol": symbol, "signal": "BUY", "price": 100.0, "shares": 10,
+    "why": "t", "urgency": "🟢 ACTIONABLE", "mode": "ENTRY", "gates": "5/5"}
+orch13.step(["P7GSIZE"], risk_pct=1.0)
+check("step(): a cached elevated stress-test risk budget halves new-entry size",
+      "P7GSIZE" in broker7.positions and broker7.positions["P7GSIZE"]["qty"] == 5)
 
 print("\n" + "=" * 44)
 passed = sum(1 for _, ok in results if ok)
