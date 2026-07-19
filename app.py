@@ -470,6 +470,13 @@ with t_trades:
                     + (" · <span style='color:#ef4444'>⚠️ CROWDED — "
                        "effectively one trade</span>" if warn else "")
                     + "</div>", unsafe_allow_html=True)
+    corr_reg = state.get("correlation_regime")
+    if corr_reg:
+        st.markdown(f"<div class='qt-panel'>📈 <b>Correlation regime "
+                    f"(P7f, rolling 20d)</b> · {corr_reg['verdict']} · "
+                    f"avg corr {corr_reg['current_avg_correlation']} · "
+                    f"trend {corr_reg['trend_slope_per_day']:+.5f}/day"
+                    f"</div>", unsafe_allow_html=True)
     with c2:
         st.markdown("### Fills")
         if broker.fills:

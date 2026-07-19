@@ -29,6 +29,7 @@ from data.providers import DataProvider, LSEProvider
 from quant.anomaly_library import match_anomalies
 from quant.flow_confluence import confluence
 from quant.playbook import build_playbook
+from quant.correlation_monitor import CORRELATION_POLICY, correlation_regime
 from quant.execution_quality import slippage_report
 from quant.regime_gate import REGIME_POLICY, classify_regime
 from quant.risk import correlation_heat, portfolio_var
@@ -228,6 +229,40 @@ class RuleOrchestrator:
                            f"{pv.get('VaR_%','—')}%"
                            + (" · ⚠️ CROWDED BOOK — positions are "
                               "effectively one trade" if warn else "")),
+                data=out)
+        return out
+
+    def correlation_monitor(self) -> dict:
+        """P7f: rolling 20-day correlation regime across the live book —
+        a hard alert at >=0.7 avg pairwise correlation, and an early-
+        warning flag when correlations are trending toward 1 even below
+        that threshold (de-risk BEFORE the drawdown, not after). Distinct
+        from correlation_watch()'s static, full-history snapshot; this
+        also produces a sizing policy that step() applies to new
+        entries, stacking with the P7c/P7e gates rather than replacing
+        them."""
+        pos = self._broker.positions
+        if len(pos) < 2:
+            return {"policy": CORRELATION_POLICY["normal"]}
+        rets = {}
+        for t in pos:
+            df = self._provider.get_candles(t)
+            if len(df) >= 60:
+                rets[t] = df["Close"].pct_change().dropna()
+        if len(rets) < 2:
+            return {"policy": CORRELATION_POLICY["normal"]}
+        out = correlation_regime(rets)
+        if "error" in out:
+            return {**out, "policy": CORRELATION_POLICY["normal"]}
+        self._state.set("correlation_regime", out, source="risk")
+        if out["alert"] or out["converging_early_warning"]:
+            self._audit.record(
+                "RiskEngine", "CORRELATION REGIME ALERT",
+                model="rolling 20d pairwise correlation + trend",
+                reasoning=(f"{out['verdict']}: avg pairwise correlation "
+                          f"{out['current_avg_correlation']} (trend "
+                          f"{out['trend_slope_per_day']:+.5f}/day across "
+                          f"the live book)"),
                 data=out)
         return out
 
@@ -573,6 +608,9 @@ class RuleOrchestrator:
             if eq_now > 0:
                 cb = self._circuit_breaker.update(eq_now)
 
+        corr_pol = self.correlation_monitor().get(
+            "policy", CORRELATION_POLICY["normal"])
+
         for s in symbols:
             held_pos = self._broker.positions.get(s)
             eq0 = self._broker.equity(prices_seen)
@@ -632,9 +670,21 @@ class RuleOrchestrator:
                         data={"symbol": s, "signal": "BUY", "price": price,
                              "circuit_breaker": cb})
                     continue
+                if not corr_pol["new_trades_allowed"]:
+                    self._audit.record(
+                        "Orchestrator", "SIGNAL LOGGED (CORRELATION ALERT)",
+                        trigger=f"signals.{s}", model="rule-v1",
+                        reasoning=(f"{s}: BUY signal logged but NOT traded "
+                                  f"— rolling correlation regime ALERT, "
+                                  f"the book is effectively one trade "
+                                  f"(P7f correlation monitor)"),
+                        data={"symbol": s, "signal": "BUY", "price": price})
+                    continue
                 qty = int(sig.get("shares") or 0)
                 if pol["size_multiplier"] < 1.0:
                     qty = int(qty * pol["size_multiplier"])
+                if corr_pol["size_multiplier"] < 1.0:
+                    qty = int(qty * corr_pol["size_multiplier"])
                 if cb and cb["size_multiplier"] < 1.0:
                     qty = int(qty * cb["size_multiplier"])
                 if qty < 1:

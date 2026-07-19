@@ -28,6 +28,7 @@ from core.circuit_breaker import DrawdownCircuitBreaker
 from quant.transaction_costs import corwin_schultz_spread, expected_trade_cost
 from quant.regime_gate import REGIME_POLICY, classify_regime
 from quant.execution_quality import slippage_report
+from quant.correlation_monitor import CORRELATION_POLICY, correlation_regime
 from data.news import NewsProvider
 
 results = []
@@ -532,6 +533,10 @@ orch7 = RuleOrchestrator(bus, state, audit, risk, broker, FakeProvider(),
 # regime a given test symbol lands in isn't stable across runs)
 orch7._regime_gate = lambda symbol: {"regime": "Bull",
                                      "policy": REGIME_POLICY["Bull"]}
+# same isolation for P7f: the shared `broker` accumulates positions across
+# this whole file, so a real correlation_monitor() call here would depend
+# on whatever's held by the time this test runs -- not what's under test.
+orch7.correlation_monitor = lambda: {"policy": CORRELATION_POLICY["normal"]}
 orch7.analyze = lambda symbol, **kw: {
     "symbol": symbol, "signal": "BUY", "price": 100.0, "shares": 5,
     "why": "test forced buy", "urgency": "🟢 ACTIONABLE", "mode": "ENTRY",
@@ -672,6 +677,7 @@ check("risk: approves a BUY when expected edge >= 2x expected cost",
 orch9 = RuleOrchestrator(bus, state, audit, risk, broker, FakeProvider())
 orch9._regime_gate = lambda symbol: {"regime": "Bull",
                                      "policy": REGIME_POLICY["Bull"]}
+orch9.correlation_monitor = lambda: {"policy": CORRELATION_POLICY["normal"]}
 orch9.analyze = lambda symbol, **kw: {
     "symbol": symbol, "signal": "BUY", "price": 100.0, "shares": 5,
     "why": "test cost display", "urgency": "🟢 ACTIONABLE", "mode": "ENTRY",
@@ -714,6 +720,7 @@ check("strategy_registry: performance_by_regime splits settled signals by regime
 
 # ---- 41. P7c: RuleOrchestrator.step() enforces the regime gate
 orch10 = RuleOrchestrator(bus, state, audit, risk, broker, FakeProvider())
+orch10.correlation_monitor = lambda: {"policy": CORRELATION_POLICY["normal"]}
 orch10._regime_gate = lambda symbol: {"regime": "Storm",
                                       "policy": REGIME_POLICY["Storm"]}
 orch10.analyze = lambda symbol, **kw: {
@@ -772,6 +779,50 @@ eqr1 = orch11.execution_quality_report(lookback_days=7)
 check("execution_quality_report: writes state.execution_quality + an audit record",
       state.get("execution_quality") is not None
       and any(r["action"] == "EXECUTION QUALITY REPORT" for r in audit.tail(20)))
+
+# ---- 45. P7f: correlation_monitor — rolling regime + early-warning trend
+_rng13 = np.random.default_rng(11)
+_n13 = 150
+_common = _rng13.normal(0, 0.01, _n13)
+_idx13 = pd.bdate_range("2024-01-01", periods=_n13)
+_indep_a, _indep_b = _rng13.normal(0, 0.01, _n13), _rng13.normal(0, 0.01, _n13)
+_a_conv, _b_conv = np.zeros(_n13), np.zeros(_n13)
+for _t in range(_n13):
+    _w = _t / _n13                            # ramps 0 -> 1: full convergence
+    _a_conv[_t] = _w * _common[_t] + (1 - _w) * _indep_a[_t]
+    _b_conv[_t] = _w * _common[_t] + (1 - _w) * _indep_b[_t]
+_rets_converging = {"A": pd.Series(_a_conv, index=_idx13),
+                    "B": pd.Series(_b_conv, index=_idx13)}
+_cr_alert = correlation_regime(_rets_converging)
+check("correlation_monitor: full convergence trips the hard ALERT",
+      _cr_alert["alert"] and _cr_alert["current_avg_correlation"] > 0.7)
+
+_rets_flat = {"A": pd.Series(_rng13.normal(0, 0.01, _n13), index=_idx13),
+             "B": pd.Series(_rng13.normal(0, 0.01, _n13), index=_idx13)}
+check("correlation_monitor: independent series stay in the normal state",
+      correlation_regime(_rets_flat)["state"] == "normal")
+
+# ---- 46. P7f: RuleOrchestrator.correlation_monitor() wiring
+# a FRESH broker (0 positions) -- the shared `broker` has accumulated many
+# positions from earlier tests in this file by now.
+broker6 = PaperBroker(cfg, bus, state, audit, path="runtime/test_broker_p7f.json")
+orch12 = RuleOrchestrator(bus, state, audit, risk, broker6, FakeProvider())
+check("correlation_monitor(): fewer than 2 positions -> normal policy, no error",
+      orch12.correlation_monitor()["policy"] == CORRELATION_POLICY["normal"])
+
+# ---- 47. P7f: step() blocks new entries on a correlation ALERT
+orch12._regime_gate = lambda symbol: {"regime": "Bull",
+                                      "policy": REGIME_POLICY["Bull"]}
+orch12.correlation_monitor = lambda: {"state": "alert", "alert": True,
+                                      "policy": CORRELATION_POLICY["alert"]}
+orch12.analyze = lambda symbol, **kw: {
+    "symbol": symbol, "signal": "BUY", "price": 100.0, "shares": 5,
+    "why": "t", "urgency": "🟢 ACTIONABLE", "mode": "ENTRY", "gates": "5/5"}
+orch12.step(["P7FALERT"], risk_pct=1.0)
+check("step(): a correlation regime ALERT blocks a new BUY entry",
+      "P7FALERT" not in broker6.positions
+      and any(r["action"] == "SIGNAL LOGGED (CORRELATION ALERT)"
+             for r in audit.tail(20)))
 
 print("\n" + "=" * 44)
 passed = sum(1 for _, ok in results if ok)
