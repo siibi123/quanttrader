@@ -195,6 +195,25 @@ with st.sidebar:
             st.caption(f"Last eval: {last_val['decision']} · bootstrap CI "
                        f"[{bc.get('CI90_low_%', '—')}%, "
                        f"{bc.get('CI90_high_%', '—')}%]")
+        perf_by_regime = registry.performance_by_regime(strat_name)
+        if perf_by_regime:
+            st.caption("Per-regime (P7c): " + " · ".join(
+                f"{r} n={d['n']} mean={d['mean_return_%']}% "
+                f"win={d['win_rate_%']}%"
+                for r, d in perf_by_regime.items()))
+    with st.expander("REGIME (P7c)", expanded=False):
+        reg_info = state.get(f"regime.{chart_sym}")
+        if reg_info:
+            r_badge = {"Bull": "🟢", "Bear": "🟡", "Storm": "🔴"}.get(
+                reg_info["regime"], "⚪")
+            st.caption(f"{r_badge} {chart_sym}: {reg_info['regime']} regime")
+            pol = reg_info["policy"]
+            st.caption(f"Size {pol['size_multiplier']:.0%}"
+                       + (" · dip-buys only" if pol["dip_only"] else "")
+                       + ("" if pol["new_trades_allowed"] else " · NO NEW TRADES")
+                       + (" · stops tightened" if pol["tighten_stops"] else ""))
+        else:
+            st.caption("Run a decision cycle to classify the current regime.")
     with st.expander("DRAWDOWN CIRCUIT BREAKER (P7e)", expanded=True):
         cbs = circuit_breaker.status()
         dd = cbs.get("drawdown_pct", 0.0)

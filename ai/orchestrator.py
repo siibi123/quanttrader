@@ -29,6 +29,7 @@ from data.providers import DataProvider, LSEProvider
 from quant.anomaly_library import match_anomalies
 from quant.flow_confluence import confluence
 from quant.playbook import build_playbook
+from quant.regime_gate import REGIME_POLICY, classify_regime
 from quant.risk import correlation_heat, portfolio_var
 from quant.sector_engine import rank_sectors_and_names
 from quant.signals import BUY_TH, SELL_TH, composite, rsi
@@ -116,6 +117,29 @@ class RuleOrchestrator:
                 pass
         return out
 
+    def _regime_gate(self, symbol: str) -> dict:
+        """P7c: classify Bull/Bear/Storm via the P2 HMM and return its
+        policy. Storm fires an alert (audit + regime.interrupt event) —
+        the policy gates sizing and which entries step() allows."""
+        df = self._provider.get_candles(symbol)
+        if len(df) < 90:
+            return {"regime": "Bull", "policy": REGIME_POLICY["Bull"]}
+        rc = classify_regime(df["Close"].pct_change())
+        self._state.set(f"regime.{symbol}",
+                        {"regime": rc["regime"], "policy": rc["policy"]},
+                        source="risk")
+        if rc.get("regime") == "Storm":
+            self._audit.record(
+                "RiskEngine", "STORM REGIME ALERT", trigger=symbol,
+                model="quant.regime_gate (P2 HMM Bull/Bear/Storm mapping)",
+                reasoning=(f"{symbol}: HMM's highest-volatility state is "
+                          f"active — STORM regime. No new trades; tighten "
+                          f"stops on any existing position."),
+                data=rc)
+            self._bus.publish(Event("regime.alert", {"symbol": symbol, **rc},
+                                    source="risk"))
+        return rc
+
     # ---- indicators (self-contained; QuantSignal engines port in later) --
     @staticmethod
     def _rsi(close: pd.Series, n: int = 2) -> float:
@@ -134,20 +158,26 @@ class RuleOrchestrator:
         return float(tr.rolling(n).mean().iloc[-1])
 
     def analyze(self, symbol: str, equity: float = 10000.0,
-                risk_pct: float = 1.0, held: dict | None = None) -> dict:
+                risk_pct: float = 1.0, held: dict | None = None,
+                regime: str | None = None) -> dict:
         """QuantSignal fusion: the 5-gate Playbook + 7-model verdict drive
-        the signal; the reasoning IS the playbook instruction."""
+        the signal; the reasoning IS the playbook instruction.
+
+        regime: P7c Bull/Bear/Storm from quant.regime_gate. In Storm, an
+        existing position's fallback stop tightens from 6% to 3% below
+        entry — "tighten all stops" per the regime policy."""
         df = self._provider.get_candles(symbol)
         if len(df) < 220:
             return {"symbol": symbol, "signal": "NONE",
                     "why": "insufficient history"}
         price = float(df["Close"].iloc[-1])
         if held and held.get("qty", 0) > 0:
+            stop_frac = 0.97 if regime == "Storm" else 0.94
             pb = build_playbook(df, account=equity, risk_pct=risk_pct,
                                 in_position=True,
                                 entry=float(held["avg_price"]),
                                 stop=float(held.get(
-                                    "stop", held["avg_price"] * 0.94)))
+                                    "stop", held["avg_price"] * stop_frac)))
             sig = "SELL" if any(k in pb["instruction"]
                                 for k in ("EXIT", "TIGHTEN")) else "NONE"
             out = {"symbol": symbol, "signal": sig, "price": price,
@@ -526,8 +556,10 @@ class RuleOrchestrator:
         for s in symbols:
             held_pos = self._broker.positions.get(s)
             eq0 = self._broker.equity(prices_seen)
+            rc = self._regime_gate(s)
+            pol = rc["policy"]
             sig = self.analyze(s, equity=eq0, risk_pct=risk_pct,
-                               held=held_pos)
+                               held=held_pos, regime=rc["regime"])
             price = sig.get("price", 0)
             if price:
                 prices_seen[s] = price
@@ -535,7 +567,8 @@ class RuleOrchestrator:
 
             if sig["signal"] in ("BUY", "SELL") and self._registry and price > 0:
                 self._registry.log_signal(self.STRATEGY_NAME, s,
-                                          sig["signal"], price)
+                                          sig["signal"], price,
+                                          regime=rc["regime"])
 
             if sig["signal"] == "BUY" and not held and price > 0:
                 if not may_enter:
@@ -546,6 +579,27 @@ class RuleOrchestrator:
                                   f"strategy '{self.STRATEGY_NAME}' is still "
                                   f"in INCUBATION (P7a promotion gate)"),
                         data={"symbol": s, "signal": "BUY", "price": price})
+                    continue
+                if not pol["new_trades_allowed"]:
+                    self._audit.record(
+                        "Orchestrator", "SIGNAL LOGGED (STORM REGIME)",
+                        trigger=f"signals.{s}", model="rule-v1",
+                        reasoning=(f"{s}: BUY signal logged but NOT traded "
+                                  f"— STORM regime forbids new trades "
+                                  f"(P7c regime gate)"),
+                        data={"symbol": s, "signal": "BUY", "price": price,
+                             "regime": rc["regime"]})
+                    continue
+                if pol["dip_only"] and sig.get("urgency") != "🟡 FAST SETUP":
+                    self._audit.record(
+                        "Orchestrator", "SIGNAL LOGGED (BEAR REGIME)",
+                        trigger=f"signals.{s}", model="rule-v1",
+                        reasoning=(f"{s}: BUY signal logged but NOT traded "
+                                  f"— BEAR regime only allows dip-buys at "
+                                  f"extremes, this was a trend entry "
+                                  f"(P7c regime gate)"),
+                        data={"symbol": s, "signal": "BUY", "price": price,
+                             "regime": rc["regime"]})
                     continue
                 if cb and (cb["halted"] or cb["only_risk_reducing"]):
                     self._audit.record(
@@ -559,6 +613,8 @@ class RuleOrchestrator:
                              "circuit_breaker": cb})
                     continue
                 qty = int(sig.get("shares") or 0)
+                if pol["size_multiplier"] < 1.0:
+                    qty = int(qty * pol["size_multiplier"])
                 if cb and cb["size_multiplier"] < 1.0:
                     qty = int(qty * cb["size_multiplier"])
                 if qty < 1:

@@ -67,15 +67,19 @@ class StrategyRegistry:
             return self._ensure(strategy)["status"]
 
     def log_signal(self, strategy: str, symbol: str, direction: str,
-                   price: float, horizon_days: int = FORWARD_HORIZON_DAYS) -> None:
-        """direction: "BUY" or "SELL". Settled later via settle_signals()."""
+                   price: float, horizon_days: int = FORWARD_HORIZON_DAYS,
+                   regime: str | None = None) -> None:
+        """direction: "BUY" or "SELL". Settled later via settle_signals().
+        regime (P7c: Bull/Bear/Storm) is stored so performance can be
+        broken out per regime later, even though promotion itself is
+        gated on the pooled sample across all regimes."""
         with self._lock:
             st = self._ensure(strategy)
             st["signals"].append({
                 "id": str(uuid.uuid4())[:8], "ts": time.time(),
                 "symbol": symbol, "direction": direction, "entry_price": price,
-                "horizon_days": horizon_days, "settled": False,
-                "forward_return": None})
+                "horizon_days": horizon_days, "regime": regime,
+                "settled": False, "forward_return": None})
             self._save()
 
     def settle_signals(self, strategy: str, price_lookup) -> int:
@@ -116,6 +120,27 @@ class StrategyRegistry:
     def last_validation(self, strategy: str) -> dict:
         with self._lock:
             return dict(self._ensure(strategy).get("validation") or {})
+
+    def performance_by_regime(self, strategy: str) -> dict:
+        """P7c: settled-signal stats (n, mean forward return, win rate)
+        grouped by the Bull/Bear/Storm regime active when each signal
+        was logged. Regimes with no settled signals are omitted rather
+        than shown as a fabricated zero."""
+        st = self._ensure(strategy)
+        by_regime: dict[str, list[float]] = {}
+        for s in st["signals"]:
+            if not s["settled"]:
+                continue
+            by_regime.setdefault(s.get("regime") or "Unknown", []).append(
+                s["forward_return"])
+        out = {}
+        for regime, rets in by_regime.items():
+            arr = np.array(rets, dtype=float)
+            out[regime] = {
+                "n": len(arr),
+                "mean_return_%": round(float(arr.mean()) * 100, 2),
+                "win_rate_%": round(float((arr > 0).mean()) * 100, 1)}
+        return out
 
     def evaluate_promotion(self, strategy: str, n_trials: int = 7) -> dict:
         """The mandatory gate: deflated Sharpe + HLZ haircut + permutation

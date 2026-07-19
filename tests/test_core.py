@@ -26,6 +26,7 @@ from quant.validation import bootstrap_mean_return
 from core.strategy_registry import MIN_SIGNALS_TO_PROMOTE, StrategyRegistry
 from core.circuit_breaker import DrawdownCircuitBreaker
 from quant.transaction_costs import corwin_schultz_spread, expected_trade_cost
+from quant.regime_gate import REGIME_POLICY, classify_regime
 from data.news import NewsProvider
 
 results = []
@@ -525,6 +526,11 @@ check("strategy_registry: holds in INCUBATION with too few settled signals",
 reg7 = StrategyRegistry(audit, path="runtime/test_registry_p7a_orch.json")
 orch7 = RuleOrchestrator(bus, state, audit, risk, broker, FakeProvider(),
                          registry=reg7)
+# isolate this test from P7c's regime gate (FakeProvider's synthetic path
+# per symbol depends on Python's per-process hash randomization, so which
+# regime a given test symbol lands in isn't stable across runs)
+orch7._regime_gate = lambda symbol: {"regime": "Bull",
+                                     "policy": REGIME_POLICY["Bull"]}
 orch7.analyze = lambda symbol, **kw: {
     "symbol": symbol, "signal": "BUY", "price": 100.0, "shares": 5,
     "why": "test forced buy", "urgency": "🟢 ACTIONABLE", "mode": "ENTRY",
@@ -619,6 +625,8 @@ broker4.day_start_equity = 9500.0      # keep the (unrelated) daily-loss check f
 risk4 = RiskEngine(cfg, bus, state, audit, circuit_breaker=cb3)
 orch8 = RuleOrchestrator(bus, state, audit, risk4, broker4, FakeProvider(),
                          circuit_breaker=cb3)
+orch8._regime_gate = lambda symbol: {"regime": "Bull",
+                                     "policy": REGIME_POLICY["Bull"]}
 orch8.analyze = lambda symbol, **kw: {
     "symbol": symbol, "signal": "BUY", "price": 100.0, "shares": 10,
     "why": "test circuit breaker sizing", "urgency": "🟢 ACTIONABLE",
@@ -661,6 +669,8 @@ check("risk: approves a BUY when expected edge >= 2x expected cost",
 
 # ---- 38. P7b: RuleOrchestrator.step() shows expected cost on every proposal
 orch9 = RuleOrchestrator(bus, state, audit, risk, broker, FakeProvider())
+orch9._regime_gate = lambda symbol: {"regime": "Bull",
+                                     "policy": REGIME_POLICY["Bull"]}
 orch9.analyze = lambda symbol, **kw: {
     "symbol": symbol, "signal": "BUY", "price": 100.0, "shares": 5,
     "why": "test cost display", "urgency": "🟢 ACTIONABLE", "mode": "ENTRY",
@@ -670,6 +680,68 @@ propose_recs = [r for r in audit.tail(30) if r["action"] == "PROPOSE BUY"
                and r.get("trigger") == "signals.P7BCOST"]
 check("step(): PROPOSE BUY audit record shows expected cost",
       len(propose_recs) == 1 and "expected cost" in propose_recs[0]["reasoning"])
+
+# ---- 39. P7c: regime_gate — Bull/Bear/Storm mapping from the P2 HMM
+_rng12 = np.random.default_rng(6)
+_bull12 = _rng12.normal(0.0015, 0.006, 150)
+_bear12 = _rng12.normal(-0.0015, 0.006, 150)
+_storm12 = _rng12.normal(0.0, 0.04, 100)
+_r_storm_ending = pd.Series(np.concatenate([_bull12, _bear12, _storm12]))
+_rc = classify_regime(_r_storm_ending)
+check("regime_gate: the highest-vol state is labeled Storm regardless of its mean",
+      _rc["regime"] == "Storm"
+      and _rc["state_labels"][_rc["hmm"]["state_vols_pct"].index(
+          max(_rc["hmm"]["state_vols_pct"]))] == "Storm")
+check("regime_gate: Storm policy blocks new trades and tightens stops",
+      not REGIME_POLICY["Storm"]["new_trades_allowed"]
+      and REGIME_POLICY["Storm"]["tighten_stops"])
+check("regime_gate: Bear policy is dip-only at half size",
+      REGIME_POLICY["Bear"]["dip_only"]
+      and REGIME_POLICY["Bear"]["size_multiplier"] == 0.5)
+
+# ---- 40. P7c: StrategyRegistry tracks settled-signal performance per regime
+reg2 = StrategyRegistry(audit, path="runtime/test_registry_p7c.json")
+reg2.log_signal("s3", "AAA", "BUY", 100.0, horizon_days=10, regime="Bull")
+reg2.log_signal("s3", "BBB", "BUY", 100.0, horizon_days=10, regime="Bear")
+for sgl in reg2._data["s3"]["signals"]:
+    sgl["ts"] = time.time() - 11 * 86400
+reg2.settle_signals("s3", price_lookup=lambda sym: 110.0 if sym == "AAA" else 95.0)
+perf = reg2.performance_by_regime("s3")
+check("strategy_registry: performance_by_regime splits settled signals by regime",
+      perf["Bull"]["n"] == 1 and perf["Bull"]["mean_return_%"] == 10.0
+      and perf["Bear"]["n"] == 1 and perf["Bear"]["mean_return_%"] == -5.0)
+
+# ---- 41. P7c: RuleOrchestrator.step() enforces the regime gate
+orch10 = RuleOrchestrator(bus, state, audit, risk, broker, FakeProvider())
+orch10._regime_gate = lambda symbol: {"regime": "Storm",
+                                      "policy": REGIME_POLICY["Storm"]}
+orch10.analyze = lambda symbol, **kw: {
+    "symbol": symbol, "signal": "BUY", "price": 100.0, "shares": 5,
+    "why": "t", "urgency": "🟢 ACTIONABLE", "mode": "ENTRY", "gates": "5/5"}
+orch10.step(["P7CSTORM"], risk_pct=1.0)
+check("step(): STORM regime blocks a new BUY entry entirely",
+      "P7CSTORM" not in broker.positions
+      and any(r["action"] == "SIGNAL LOGGED (STORM REGIME)"
+             for r in audit.tail(20)))
+
+orch10._regime_gate = lambda symbol: {"regime": "Bear",
+                                      "policy": REGIME_POLICY["Bear"]}
+orch10.analyze = lambda symbol, **kw: {
+    "symbol": symbol, "signal": "BUY", "price": 100.0, "shares": 10,
+    "why": "t", "urgency": "🟢 ACTIONABLE", "mode": "ENTRY", "gates": "5/5"}
+orch10.step(["P7CBEARTREND"], risk_pct=1.0)
+check("step(): BEAR regime blocks a trend-entry BUY (dip-buys only)",
+      "P7CBEARTREND" not in broker.positions
+      and any(r["action"] == "SIGNAL LOGGED (BEAR REGIME)"
+             for r in audit.tail(20)))
+
+orch10.analyze = lambda symbol, **kw: {
+    "symbol": symbol, "signal": "BUY", "price": 100.0, "shares": 10,
+    "why": "t", "urgency": "🟡 FAST SETUP", "mode": "ENTRY", "gates": "4/5"}
+orch10.step(["P7CBEARDIP"], risk_pct=1.0)
+check("step(): BEAR regime allows a dip-setup BUY, sized to half",
+      "P7CBEARDIP" in broker.positions
+      and broker.positions["P7CBEARDIP"]["qty"] == 5)
 
 print("\n" + "=" * 44)
 passed = sum(1 for _, ok in results if ok)

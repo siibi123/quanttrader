@@ -161,7 +161,7 @@ class GlobalState:
     # ---- the AI's senses --------------------------------------------------
     AI_KEYS = ["session", "feed", "quotes", "portfolio", "risk",
                "signals", "research", "options", "news", "macro",
-               "sector_scan", "flow", "ui"]
+               "sector_scan", "flow", "regime", "ui"]
 
     def to_ai_context(self, max_chars: int = 6000) -> str:
         """Curated, compact JSON of everything the AI needs to be
