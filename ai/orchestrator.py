@@ -29,6 +29,7 @@ from data.providers import DataProvider, LSEProvider
 from quant.anomaly_library import match_anomalies
 from quant.flow_confluence import confluence
 from quant.playbook import build_playbook
+from quant.execution_quality import slippage_report
 from quant.regime_gate import REGIME_POLICY, classify_regime
 from quant.risk import correlation_heat, portfolio_var
 from quant.sector_engine import rank_sectors_and_names
@@ -428,6 +429,25 @@ class RuleOrchestrator:
                           f"elevated informed-trading risk; RiskEngine's "
                           f"actual checks are unchanged, this is advisory"),
                 data={"vpin_percentile": out.get("vpin_percentile")})
+        return out
+
+    def execution_quality_report(self, lookback_days: int = 7) -> dict:
+        """P7d: slippage-vs-decision-price report over recent fills ->
+        state.execution_quality + audit. Honestly empty if there's
+        nothing settled to report yet."""
+        out = slippage_report(self._broker.fills, lookback_days=lookback_days)
+        if "error" in out:
+            return out
+        self._state.set("execution_quality", out, source="broker")
+        self._audit.record(
+            "PaperBroker", "EXECUTION QUALITY REPORT",
+            model="slippage vs decision price",
+            reasoning=(f"{out['n_fills']} fill(s) over the last "
+                      f"{lookback_days}d: avg slippage "
+                      f"{out['avg_slippage_pct']:+.3f}%, worst "
+                      f"{out['worst_slippage_pct']:+.3f}%, total cost "
+                      f"drag ${out['total_cost_drag_$']:,.2f}"),
+            data=out)
         return out
 
     def sector_scan(self, symbols: list[str], account: float = 5000.0,

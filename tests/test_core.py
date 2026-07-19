@@ -27,6 +27,7 @@ from core.strategy_registry import MIN_SIGNALS_TO_PROMOTE, StrategyRegistry
 from core.circuit_breaker import DrawdownCircuitBreaker
 from quant.transaction_costs import corwin_schultz_spread, expected_trade_cost
 from quant.regime_gate import REGIME_POLICY, classify_regime
+from quant.execution_quality import slippage_report
 from data.news import NewsProvider
 
 results = []
@@ -742,6 +743,35 @@ orch10.step(["P7CBEARDIP"], risk_pct=1.0)
 check("step(): BEAR regime allows a dip-setup BUY, sized to half",
       "P7CBEARDIP" in broker.positions
       and broker.positions["P7CBEARDIP"]["qty"] == 5)
+
+# ---- 42. P7d: PaperBroker fills record decision_price + signed slippage_pct
+broker5 = PaperBroker(cfg, bus, state, audit, path="runtime/test_broker_p7d.json")
+buy_order = Order("P7D", "BUY", 10, reason="test"); buy_order.approved = True
+f_buy = broker5.execute(buy_order, 100.0)
+check("broker: BUY fill records decision_price and a positive (cost) slippage_pct",
+      f_buy["decision_price"] == 100.0 and f_buy["slippage_pct"] > 0)
+sell_order = Order("P7D", "SELL", 10, reason="test"); sell_order.approved = True
+f_sell = broker5.execute(sell_order, 100.0)
+check("broker: SELL fill also records a positive (cost) slippage_pct",
+      f_sell["decision_price"] == 100.0 and f_sell["slippage_pct"] > 0)
+
+# ---- 43. P7d: slippage_report — honest empty cases + real aggregation
+check("execution_quality: no fills yet is an honest error, not a fake report",
+      "error" in slippage_report([]))
+_old_fill = {**f_buy, "ts": time.time() - 30 * 86400}   # outside a 7d lookback
+check("execution_quality: fills outside the lookback window are excluded",
+      "error" in slippage_report([_old_fill], lookback_days=7))
+_rep = slippage_report([f_buy, f_sell], lookback_days=7)
+check("execution_quality: aggregates avg/worst slippage and cost drag",
+      _rep["n_fills"] == 2 and _rep["avg_slippage_pct"] > 0
+      and _rep["total_cost_drag_$"] > 0 and len(_rep["worst_fills"]) == 2)
+
+# ---- 44. P7d: RuleOrchestrator.execution_quality_report() wires state + audit
+orch11 = RuleOrchestrator(bus, state, audit, risk, broker5, FakeProvider())
+eqr1 = orch11.execution_quality_report(lookback_days=7)
+check("execution_quality_report: writes state.execution_quality + an audit record",
+      state.get("execution_quality") is not None
+      and any(r["action"] == "EXECUTION QUALITY REPORT" for r in audit.tail(20)))
 
 print("\n" + "=" * 44)
 passed = sum(1 for _, ok in results if ok)

@@ -276,9 +276,18 @@ class PaperBroker:
                 p["qty"] -= order.qty
                 if p["qty"] == 0:
                     del self.positions[order.ticker]
+            # P7d: slippage vs the DECISION price (pre-slippage `price`
+            # arg), sign-normalized so positive always means "cost" —
+            # paying more than decision price on a BUY, or receiving less
+            # than decision price on a SELL.
+            slip_sign = 1 if order.side == "BUY" else -1
+            slippage_pct = round((px - price) / price * 100 * slip_sign, 4) \
+                if price > 0 else 0.0
             fill = {"ts": time.time(), "order_id": order.id,
                     "ticker": order.ticker, "side": order.side,
                     "qty": order.qty, "price": round(px, 4),
+                    "decision_price": round(price, 4),
+                    "slippage_pct": slippage_pct,
                     "fee": round(fee, 4), "realized": round(realized, 2),
                     "reason": order.reason}
             self.fills.append(fill)

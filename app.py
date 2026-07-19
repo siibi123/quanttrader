@@ -663,6 +663,33 @@ with t_lab:
                 " · ".join(fc["tape_reasons"] + fc["options_reasons"]) +
                 "</div>", unsafe_allow_html=True)
 
+    st.markdown("### 📊 Execution Quality (P7d)")
+    eq_days = st.slider("Lookback (days)", 1, 30, 7, key="eq_lookback")
+    if st.button("Generate execution report", use_container_width=True):
+        eqr = orch.execution_quality_report(lookback_days=eq_days)
+        if "error" in eqr:
+            st.info(eqr["error"])
+        else:
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Avg slippage", f"{eqr['avg_slippage_pct']:+.3f}%")
+            m2.metric("Worst fill", f"{eqr['worst_slippage_pct']:+.3f}%")
+            m3.metric("Total cost drag", f"${eqr['total_cost_drag_$']:,.2f}")
+            st.caption(f"{eqr['n_fills']} fill(s) over the last "
+                       f"{eqr['lookback_days']} day(s)")
+            if eqr["worst_fills"]:
+                wf = pd.DataFrame(eqr["worst_fills"])
+                wf["time"] = pd.to_datetime(wf["ts"], unit="s").dt.strftime(
+                    "%m-%d %H:%M")
+                st.dataframe(wf[["time", "ticker", "side", "qty",
+                                "decision_price", "price", "slippage_pct"]],
+                            use_container_width=True, hide_index=True)
+            st.caption("PaperBroker currently applies a fixed 0.05% "
+                       "slippage constant, not a market-condition model — "
+                       "this report is real infrastructure over real "
+                       "fills, but every number will cluster near that "
+                       "fixed value until the broker's slippage model "
+                       "itself becomes more realistic.")
+
 with t_audit:
     st.markdown("### Audit timeline — trigger → model → reasoning")
     tail = audit.tail(20)
