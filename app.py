@@ -723,6 +723,17 @@ with t_lab:
                        "result is cached and applied to every new entry's "
                        "sizing until the next time this test runs.")
 
+    st.markdown("### 📋 Daily Institutional Report (P7h)")
+    if st.button("Generate today's report", use_container_width=True):
+        with st.spinner("Assembling P&L, risk, signal quality, candidates…"):
+            rep = orch.daily_report(watchlist=symbols)
+        st.success(f"Saved to `{rep['path']}`")
+        st.markdown(rep["markdown"])
+        st.download_button("Download markdown", rep["markdown"],
+                           file_name=f"{rep['date']}.md", mime="text/markdown")
+    st.caption("On-demand for now — no scheduler exists yet to genuinely "
+               "auto-run this at market close (see CLAUDE.md roadmap).")
+
 with t_audit:
     st.markdown("### Audit timeline — trigger → model → reasoning")
     tail = audit.tail(20)

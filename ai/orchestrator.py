@@ -16,6 +16,7 @@ LLM exactly as it does to the rules — no exceptions, by construction.
 """
 from __future__ import annotations
 
+import os
 import time
 
 import numpy as np
@@ -30,6 +31,7 @@ from quant.anomaly_library import match_anomalies
 from quant.flow_confluence import confluence
 from quant.playbook import build_playbook
 from quant.correlation_monitor import CORRELATION_POLICY, correlation_regime
+from quant.daily_report import render_report
 from quant.execution_quality import slippage_report
 from quant.portfolio_stress import risk_budget_from_stress, simulate_portfolio
 from quant.regime_gate import REGIME_POLICY, classify_regime
@@ -465,6 +467,122 @@ class RuleOrchestrator:
                           f"elevated informed-trading risk; RiskEngine's "
                           f"actual checks are unchanged, this is advisory"),
                 data={"vpin_percentile": out.get("vpin_percentile")})
+        return out
+
+    def daily_report(self, watchlist: list[str] | None = None,
+                     reports_dir: str = "reports") -> dict:
+        """P7h: assemble + render the daily institutional report ->
+        reports/YYYY-MM-DD.md, state.daily_report, audit.
+
+        Honest limitation: "auto-generated at market close" needs a
+        scheduler, which doesn't exist yet (CLAUDE.md roadmap "Later" —
+        Hetzner/systemd deploy). This is the real report-generation
+        logic, triggered on-demand until that infrastructure lands."""
+        today = time.strftime("%Y-%m-%d")
+        cutoff = time.time() - 24 * 3600
+        marks = {t: (self._state.get(f"quotes.{t}") or {}).get(
+                    "price", p["avg_price"])
+                for t, p in self._broker.positions.items()}
+        equity = self._broker.equity(marks)
+        day_start = self._broker.day_start_equity
+        pnl_today_pct = ((equity / day_start - 1) * 100) if day_start > 0 else 0.0
+        pnl_today_dollars = equity - day_start
+
+        fills_today = []
+        for f in self._broker.fills:
+            if f.get("ts", 0) >= cutoff:
+                f2 = dict(f)
+                f2["strategy"] = self.STRATEGY_NAME
+                fills_today.append(f2)
+
+        risk_limits = {}
+        cfg = self._risk.cfg
+        gross = self._broker.gross_exposure(marks)
+        gross_cap = equity * cfg.max_gross_exposure_pct / 100
+        if equity > 0:
+            risk_limits["Gross exposure"] = {
+                "used": f"${gross:,.0f}", "cap": f"${gross_cap:,.0f}",
+                "pct": (gross / gross_cap * 100) if gross_cap > 0 else 0}
+            risk_limits["Daily loss"] = {
+                "used": f"{pnl_today_pct:+.2f}%",
+                "cap": f"-{cfg.max_daily_loss_pct}%",
+                "pct": (abs(min(pnl_today_pct, 0)) / cfg.max_daily_loss_pct * 100
+                       if cfg.max_daily_loss_pct > 0 else 0)}
+        if self._circuit_breaker:
+            cbs = self._circuit_breaker.status()
+            risk_limits["Drawdown circuit breaker"] = {
+                "used": f"{cbs.get('drawdown_pct', 0)}%",
+                "cap": "15% (hard stop)",
+                "pct": cbs.get("drawdown_pct", 0) / 15 * 100}
+
+        signals_today = {"n": 0, "buy": 0, "sell": 0}
+        settled_today = {"n": 0, "win_rate_pct": 0.0, "mean_return_pct": 0.0}
+        settled_cumulative = None
+        notes = []
+        if self._registry:
+            st = self._registry._data.get(self.STRATEGY_NAME, {})
+            todays_signals = [s for s in st.get("signals", [])
+                             if s.get("ts", 0) >= cutoff]
+            signals_today["n"] = len(todays_signals)
+            signals_today["buy"] = sum(1 for s in todays_signals
+                                       if s["direction"] == "BUY")
+            signals_today["sell"] = sum(1 for s in todays_signals
+                                        if s["direction"] == "SELL")
+            settled_today_list = [s for s in st.get("signals", [])
+                                  if s.get("settled")
+                                  and s.get("settled_ts", 0) >= cutoff]
+            if settled_today_list:
+                rets = [s["forward_return"] for s in settled_today_list]
+                settled_today = {
+                    "n": len(rets),
+                    "win_rate_pct": round(sum(1 for r in rets if r > 0)
+                                          / len(rets) * 100, 1),
+                    "mean_return_pct": round(sum(rets) / len(rets) * 100, 2)}
+            all_settled = self._registry.settled_returns(self.STRATEGY_NAME)
+            if len(all_settled):
+                settled_cumulative = {
+                    "n": len(all_settled),
+                    "win_rate_pct": round(float((all_settled > 0).mean()) * 100, 1),
+                    "mean_return_pct": round(float(all_settled.mean()) * 100, 2)}
+        else:
+            notes.append("No StrategyRegistry wired in — signal quality "
+                         "section is unavailable.")
+
+        suggestions = []
+        if watchlist:
+            scan = self.sector_scan(watchlist, account=equity)
+            suggestions = scan.get("names", [])
+        else:
+            notes.append("No watchlist passed — tomorrow's candidate "
+                        "orders section skipped this run.")
+
+        data = {
+            "date": today, "equity": equity, "day_start_equity": day_start,
+            "pnl_today_$": pnl_today_dollars, "pnl_today_pct": pnl_today_pct,
+            "fills_today": fills_today, "risk_limits": risk_limits,
+            "signals_today": signals_today, "settled_today": settled_today,
+            "settled_cumulative": settled_cumulative,
+            "suggestions": suggestions, "notes": notes,
+        }
+        report_md = render_report(data)
+
+        os.makedirs(reports_dir, exist_ok=True)
+        path = os.path.join(reports_dir, f"{today}.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(report_md)
+
+        out = {"path": path, "markdown": report_md, **data}
+        self._state.set("daily_report", {"path": path, "date": today,
+                                         "pnl_today_$": pnl_today_dollars,
+                                         "pnl_today_pct": pnl_today_pct},
+                        source="research")
+        self._audit.record(
+            "Research", "DAILY REPORT", model="daily_report (P7h)",
+            reasoning=(f"Daily report saved to {path}: equity "
+                      f"${equity:,.2f}, today {pnl_today_dollars:+,.2f} "
+                      f"({pnl_today_pct:+.2f}%), {len(fills_today)} "
+                      f"fill(s), {signals_today['n']} signal(s) logged"),
+            data={"path": path})
         return out
 
     def stress_test(self, horizon_days: int = 21, n_paths: int = 10_000) -> dict:

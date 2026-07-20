@@ -101,6 +101,7 @@ class StrategyRegistry:
                 sign = 1 if s["direction"] == "BUY" else -1
                 s["forward_return"] = float(px / s["entry_price"] - 1) * sign
                 s["settled"] = True
+                s["settled_ts"] = time.time()
                 n += 1
             if n:
                 self._save()

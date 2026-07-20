@@ -30,6 +30,7 @@ from quant.regime_gate import REGIME_POLICY, classify_regime
 from quant.execution_quality import slippage_report
 from quant.correlation_monitor import CORRELATION_POLICY, correlation_regime
 from quant.portfolio_stress import risk_budget_from_stress, simulate_portfolio
+from quant.daily_report import render_report
 from data.news import NewsProvider
 
 results = []
@@ -879,6 +880,52 @@ orch13.analyze = lambda symbol, **kw: {
 orch13.step(["P7GSIZE"], risk_pct=1.0)
 check("step(): a cached elevated stress-test risk budget halves new-entry size",
       "P7GSIZE" in broker7.positions and broker7.positions["P7GSIZE"]["qty"] == 5)
+
+# ---- 50. P7h: daily_report — markdown rendering, honest empty states
+_empty_report = render_report({
+    "date": "2026-07-20", "equity": 10000.0, "day_start_equity": 10000.0,
+    "pnl_today_$": 0.0, "pnl_today_pct": 0.0, "fills_today": [],
+    "risk_limits": {}, "signals_today": {"n": 0, "buy": 0, "sell": 0},
+    "settled_today": {"n": 0, "win_rate_pct": 0.0, "mean_return_pct": 0.0},
+    "settled_cumulative": None, "suggestions": [], "notes": ["test note"]})
+check("daily_report: renders all four required sections",
+      all(h in _empty_report for h in ("## P&L Attribution",
+                                       "## Risk Limit Utilization",
+                                       "## Signal Quality",
+                                       "## Tomorrow's Candidate Orders")))
+check("daily_report: honest empty states, not fabricated numbers",
+      "_No fills today._" in _empty_report
+      and "_No tradeable candidates ranked" in _empty_report)
+
+_filled_report = render_report({
+    "date": "2026-07-20", "equity": 10500.0, "day_start_equity": 10000.0,
+    "pnl_today_$": 500.0, "pnl_today_pct": 5.0,
+    "fills_today": [{"ticker": "AAA", "side": "BUY", "qty": 10,
+                     "price": 100.0, "realized": 0.0, "strategy": "rule_v1"}],
+    "risk_limits": {"Gross exposure": {"used": "$1,000", "cap": "$12,000",
+                                       "pct": 8.3}},
+    "signals_today": {"n": 2, "buy": 1, "sell": 1},
+    "settled_today": {"n": 3, "win_rate_pct": 66.7, "mean_return_pct": 1.2},
+    "settled_cumulative": {"n": 40, "win_rate_pct": 55.0, "mean_return_pct": 0.8},
+    "suggestions": [{"ticker": "BBB", "verdict": "LONG", "target_score": 72.0,
+                     "entry": 50.0, "stop": 47.0, "target": 56.0,
+                     "reasons_pro": ["strong momentum"]}],
+    "notes": []})
+check("daily_report: real fills/signals/suggestions render into the tables",
+      "AAA" in _filled_report and "BBB" in _filled_report
+      and "66.7" in _filled_report)
+
+# ---- 51. P7h: RuleOrchestrator.daily_report() wiring — file, state, audit
+broker8 = PaperBroker(cfg, bus, state, audit, path="runtime/test_broker_p7h.json")
+reg8 = StrategyRegistry(audit, path="runtime/test_registry_p7h.json")
+orch14 = RuleOrchestrator(bus, state, audit, risk, broker8, FakeProvider(),
+                          registry=reg8)
+rep = orch14.daily_report(watchlist=None, reports_dir="runtime/test_reports")
+check("daily_report(): writes a real markdown file to the reports dir",
+      os.path.exists(rep["path"]) and rep["path"].endswith(".md"))
+check("daily_report(): writes state.daily_report + a DAILY REPORT audit record",
+      state.get("daily_report") is not None
+      and any(r["action"] == "DAILY REPORT" for r in audit.tail(20)))
 
 print("\n" + "=" * 44)
 passed = sum(1 for _, ok in results if ok)

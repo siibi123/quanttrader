@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 runtime/
+reports/
 .env
 .venv/
 venv/
