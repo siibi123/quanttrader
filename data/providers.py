@@ -144,6 +144,42 @@ class YahooProvider(DataProvider):
                 continue
         return out
 
+    def get_quotes_batch(self, symbols: list[str]) -> dict[str, dict]:
+        """Batched quote fetch for a chunk of symbols via one yf.download()
+        call — today's still-forming daily bar as `price`, the prior
+        close as the % change baseline. This is deliberately less precise
+        than get_quote()'s yf.Ticker.fast_info (which stays the path for
+        the small priority set — positions + trading watchlist); it's
+        what makes staggered ~50-symbol universe scanning affordable
+        (P9 rate-limit protection)."""
+        import yfinance as yf
+        out: dict[str, dict] = {}
+        if not symbols:
+            return out
+        try:
+            raw = yf.download(tickers=" ".join(symbols), period="5d",
+                              interval="1d", group_by="ticker",
+                              auto_adjust=False, threads=True,
+                              progress=False)
+        except Exception:
+            return out
+        if raw is None or raw.empty:
+            return out
+        for s in symbols:
+            try:
+                sub = raw[s] if len(symbols) > 1 else raw
+                closes = sub["Close"].dropna()
+                if not len(closes):
+                    continue
+                px = float(closes.iloc[-1])
+                prev = float(closes.iloc[-2]) if len(closes) > 1 else px
+                out[s] = {"symbol": s, "price": px,
+                         "chg_pct": round((px / prev - 1) * 100, 2)
+                                    if prev else 0.0}
+            except Exception:
+                continue
+        return out
+
 
 class LSEProvider(DataProvider):
     """London Strategic Edge — VERIFIED contract (extracted from their
@@ -390,11 +426,35 @@ class CompositeProvider(DataProvider):
                     out[s] = df
         return out
 
+    def get_quotes_batch(self, symbols: list[str]) -> dict[str, dict]:
+        """Same LSE-has-no-batch-endpoint reasoning as get_candles_batch —
+        goes straight to Yahoo. Deliberately no per-symbol fallback loop
+        here (unlike get_candles_batch): this is the low-priority
+        universe-scan tier specifically to AVOID N individual round-
+        trips, so a partial/empty batch just gets retried next pass
+        rather than defeating the point via a fallback loop."""
+        yahoo = next((p for p in self.providers
+                     if isinstance(p, YahooProvider)), None)
+        return yahoo.get_quotes_batch(symbols) if yahoo else {}
+
 
 # ---------------------------------------------------------------------------
 
 class PollingFeed:
     """Background thread: poll quotes -> publish 'tick' events -> state.
+
+    Two-tier scanning (P9): `symbols` is the FULL trading universe
+    (~550 S&P 500 + Nasdaq-100 names, see data/universe.py) — scanning
+    all of it every interval_s the old way (one get_quote() round-trip
+    per symbol) would be both slow and a rate-limit problem. Instead:
+      * `priority_fn()` (positions + the small trading watchlist) gets
+        the precise per-symbol get_quote() every interval_s (30s).
+      * the full universe is scanned in `batch_size`-symbol chunks via
+        one get_quotes_batch() call, ONE chunk per tick — with
+        interval_s=30s and batch_size=50, a ~550-symbol universe (~11
+        batches) completes a full pass roughly every 5-6 minutes, i.e.
+        spread across the scheduler's 5-minute decision-cycle window
+        rather than hitting Yahoo with 550 requests at once.
 
     Honest platform note: on Streamlit Community Cloud this runs while the
     app process is awake. On a VPS (Hetzner phase) it runs 24/7 unchanged.
@@ -402,7 +462,8 @@ class PollingFeed:
 
     def __init__(self, bus: EventBus, state: GlobalState,
                  provider: DataProvider, symbols: list[str],
-                 interval_s: int = 30, market_hours_gate: bool = True):
+                 interval_s: int = 30, market_hours_gate: bool = True,
+                 priority_fn=None, batch_size: int = 50):
         self._bus, self._state, self._provider = bus, state, provider
         self.symbols = symbols
         self.interval_s = interval_s
@@ -411,6 +472,10 @@ class PollingFeed:
         # that just want to verify tick delivery on FakeProvider pass
         # False here since they don't care about real wall-clock hours.
         self.market_hours_gate = market_hours_gate
+        self._priority_fn = priority_fn or (lambda: [])
+        self.batch_size = batch_size
+        self._batch_cursor = 0
+        self._scanned_this_pass = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -433,6 +498,20 @@ class PollingFeed:
         return bool(self._thread and self._thread.is_alive()
                     and not self._stop.is_set())
 
+    def _batches(self) -> list[list[str]]:
+        syms = list(self.symbols)
+        return [syms[i:i + self.batch_size]
+               for i in range(0, len(syms), self.batch_size)]
+
+    def _publish_quotes(self, quotes: dict[str, dict]) -> bool:
+        got_any = False
+        for s, q in quotes.items():
+            if q:
+                got_any = True
+                self._state.set(f"quotes.{s}", q, source="feed")
+                self._bus.publish(Event("tick", q, source="feed"))
+        return got_any
+
     def _run(self):
         fail_count = 0
         while not self._stop.is_set():
@@ -447,20 +526,40 @@ class PollingFeed:
                     continue
 
             got_any = False
-            for s in list(self.symbols):
-                if self._stop.is_set():
-                    break
-                q = self._provider.get_quote(s)
-                if q:
-                    got_any = True
-                    self._state.set(f"quotes.{s}", q, source="feed")
-                    self._bus.publish(Event("tick", q, source="feed"))
+
+            # tier 1: positions + trading watchlist, precise, every tick
+            priority = [s for s in self._priority_fn() if s]
+            if priority:
+                for s in priority:
+                    if self._stop.is_set():
+                        break
+                    got_any |= self._publish_quotes(
+                        {s: self._provider.get_quote(s)})
+
+            # tier 2: one ~50-symbol universe batch per tick -- with
+            # interval_s=30s that spreads a ~550-symbol universe (~11
+            # batches) across roughly one 5-minute decision-cycle window
+            batches = self._batches()
+            if batches:
+                if self._batch_cursor == 0:
+                    self._scanned_this_pass = 0
+                chunk = batches[self._batch_cursor % len(batches)]
+                batch_fn = getattr(self._provider, "get_quotes_batch", None)
+                quotes = (batch_fn(chunk) if batch_fn else
+                         {s: self._provider.get_quote(s) for s in chunk})
+                got_any |= self._publish_quotes(quotes)
+                self._scanned_this_pass += len(chunk)
+                self._batch_cursor = (self._batch_cursor + 1) % len(batches)
+                self._state.set(
+                    "feed.universe_scan_progress",
+                    {"scanned": self._scanned_this_pass,
+                     "total": len(self.symbols)}, source="feed")
 
             if got_any:
                 fail_count = 0
                 if self._state.get("feed.throttled"):
                     self._state.set("feed.throttled", None, source="feed")
-            elif self.symbols:
+            elif priority or batches:
                 fail_count += 1
                 if fail_count >= 2:                # 2 empty passes in a row
                     self._state.set(

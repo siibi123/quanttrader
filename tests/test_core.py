@@ -1010,6 +1010,49 @@ check("feed: repeated empty fetches set feed.throttled for a 2min backoff",
       state.get("feed.throttled") is not None
       and state.get("feed.throttled")["retry_at"] > time.time())
 
+# ---- 56b. P9: CompositeProvider.get_quotes_batch needs a YahooProvider
+comp_no_yahoo = CompositeProvider([FakeProvider()], state)
+check("composite: get_quotes_batch returns empty without a YahooProvider "
+      "in the chain (no per-symbol fallback loop -- that would defeat "
+      "the point of batching)",
+      comp_no_yahoo.get_quotes_batch(["AAPL"]) == {})
+
+# ---- 56c. P9: PollingFeed priority tier fetches positions/watchlist
+# symbols every tick even when they're outside the universe list
+feed4 = PollingFeed(bus, state, FakeProvider(), ["UNIVA", "UNIVB", "UNIVC"],
+                    interval_s=1, market_hours_gate=False,
+                    priority_fn=lambda: ["PRIORITYSYM"])
+feed4.start()
+time.sleep(1.5)
+feed4.stop()
+check("feed: priority_fn symbols get quotes every tick regardless of "
+      "the universe batch cadence",
+      state.get("quotes.PRIORITYSYM") is not None)
+
+# ---- 56d. P9: PollingFeed scans the universe in batches via
+# get_quotes_batch (one chunk per tick), not one get_quote() per symbol
+class _BatchProvider(FakeProvider):
+    def __init__(self):
+        super().__init__()
+        self.batch_calls = []
+    def get_quotes_batch(self, symbols):
+        self.batch_calls.append(list(symbols))
+        return {s: {"symbol": s, "price": 1.0, "chg_pct": 0.0}
+               for s in symbols}
+
+bp = _BatchProvider()
+universe5 = [f"U{i}" for i in range(5)]      # batch_size=2 -> 3 batches
+feed5 = PollingFeed(bus, state, bp, universe5, interval_s=1,
+                    market_hours_gate=False, batch_size=2)
+feed5.start()
+time.sleep(2.5)                              # ~3 ticks -> exactly one pass
+feed5.stop()
+check("feed: universe scan calls get_quotes_batch in <=batch_size chunks",
+      len(bp.batch_calls) >= 3 and all(len(c) <= 2 for c in bp.batch_calls))
+prog = state.get("feed.universe_scan_progress")
+check("feed: universe_scan_progress reaches the full total after one pass",
+      prog is not None and prog["total"] == 5 and prog["scanned"] == 5)
+
 # ---- 57. P8: sector_scan rate-limited to once per 5 minutes
 _scan5_again = orch5.sector_scan(["P5A", "P5B"], account=10000, risk_pct=1.0)
 check("sector_scan: immediate repeat call is throttled, returns cached result",
