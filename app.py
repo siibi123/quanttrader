@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import dataclasses
 import time
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -18,11 +19,19 @@ from core.strategy_registry import MIN_SIGNALS_TO_PROMOTE, StrategyRegistry
 from data.news import NewsProvider
 from data.providers import (CompositeProvider, LSEProvider, PollingFeed,
                             YahooProvider, filter_price_outliers)
+from data.universe import load_universe
 
 st.set_page_config(page_title="QuantTrader", page_icon="◆", layout="wide",
                    initial_sidebar_state="expanded")
 
 ACCENT = "#22c55e"
+
+# P9: the decision cycle (real paper trades) stays on this small, explicit
+# watchlist -- deliberately NOT the full ~550-symbol universe below, which
+# only drives the feed's quote scanning. Screening the whole universe for
+# tradeable setups every 5 minutes is a real, separate feature (universe
+# pre-filter / scanner.scan_setups wiring) that hasn't been requested.
+TRADING_WATCHLIST = ["SPY", "QQQ", "AAPL", "NVDA"]
 st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=IBM+Plex+Mono:wght@400;600&display=swap');
@@ -97,24 +106,30 @@ def get_engine():
     orch = RuleOrchestrator(bus, state, audit, risk, broker, provider,
                             news=news, lse=lse, registry=registry,
                             circuit_breaker=circuit_breaker)
-    default_watchlist = ["SPY", "QQQ", "AAPL", "NVDA"]
-    feed = PollingFeed(bus, state, provider, default_watchlist,
-                       interval_s=30)
-    # symbols_fn/risk_pct_fn are callables, not fixed values, so the
-    # scheduler's background thread always sees whatever the sidebar
-    # currently has set (state.ui.watchlist/ui.risk_pct), not a snapshot
-    # frozen at process start.
+    # P9: fetch-once-and-cache S&P 500 + Nasdaq-100 universe (~550
+    # symbols) -- the feed scans ALL of it; the decision cycle keeps
+    # trading only TRADING_WATCHLIST (see module-level comment above).
+    universe = load_universe()
+    feed = PollingFeed(
+        bus, state, provider, universe, interval_s=30,
+        priority_fn=lambda: sorted(set(broker.positions) |
+                                   set(TRADING_WATCHLIST)),
+        batch_size=50)
+    # risk_pct_fn is a callable, not a fixed value, so the scheduler's
+    # background thread always sees whatever the sidebar currently has
+    # set (state.ui.risk_pct), not a snapshot frozen at process start.
     scheduler = TradingScheduler(
         orch,
-        symbols_fn=lambda: state.get("ui.watchlist") or default_watchlist,
+        symbols_fn=lambda: TRADING_WATCHLIST,
         risk_pct_fn=lambda: state.get("ui.risk_pct") or 1.0)
     scheduler.start()
     state.set("session", {"started": time.strftime(
         "%Y-%m-%d %H:%M UTC", time.gmtime())})
+    state.set("ui.watchlist", TRADING_WATCHLIST, source="ui")
     return dict(cfg=cfg, bus=bus, state=state, audit=audit, lse=lse,
                 news=news, provider=provider, broker=broker, risk=risk,
                 registry=registry, circuit_breaker=circuit_breaker,
-                orch=orch, feed=feed, scheduler=scheduler)
+                orch=orch, feed=feed, scheduler=scheduler, universe=universe)
 
 
 E = get_engine()
@@ -123,17 +138,36 @@ broker, risk, orch, feed = E["broker"], E["risk"], E["orch"], E["feed"]
 registry = E["registry"]
 circuit_breaker = E["circuit_breaker"]
 scheduler = E["scheduler"]
+universe = E["universe"]
 quotes = state.get("quotes") or {}
 
 
 @st.cache_resource
-def _autostart_feed(_feed, _symbols):
+def _autostart_feed(_feed):
     """Process-wide singleton starter: the decorated body only ever runs
     once per process (st.cache_resource), so the feed starts exactly
     once no matter how many browser sessions/reruns hit this line."""
-    _feed.symbols = _symbols
     _feed.start()
     return True
+
+
+@st.fragment(run_every=1)
+def render_cycle_countdown():
+    """P9: live countdown to the scheduler's next automatic decision
+    cycle — the button above is now just a manual override, this is
+    what tells the owner the auto-run is actually the primary path."""
+    ms = market_status()
+    if ms["session"] != "open":
+        st.caption(f"Auto decision cycle paused — market {ms['label'].lower()}.")
+        return
+    nrt = scheduler.next_run("decision_cycle")
+    if nrt is None:
+        st.caption("Scheduler not running.")
+        return
+    remaining = max(0, int((nrt - datetime.now(nrt.tzinfo)).total_seconds()))
+    m, s = divmod(remaining, 60)
+    st.caption(f"Auto-running every 5 min during market hours · "
+              f"next cycle in {m}m {s}s")
 
 # ---------------------------------------------------------------------------
 # LEFT RAIL
@@ -144,15 +178,12 @@ with st.sidebar:
                 unsafe_allow_html=True)
     st.write("")
     with st.expander("INSTRUMENT", expanded=True):
-        wl = st.text_input("Watchlist", "SPY, QQQ, AAPL, NVDA",
-                           label_visibility="collapsed")
-        symbols = [s.strip().upper() for s in wl.split(",") if s.strip()]
-        chart_sym = st.selectbox("Chart symbol", symbols or ["SPY"])
+        chart_sym = (st.text_input(
+            "Chart symbol (feed always scans full universe)",
+            "AAPL").strip().upper() or "AAPL")
         tf = st.select_slider("Timeframe", ["1h", "1d", "1wk"], value="1d")
-    # keeps the scheduler's background thread (a separate thread, not a
-    # script rerun) reading the CURRENT watchlist rather than whatever
-    # was set at process start
-    state.set("ui.watchlist", symbols, source="ui")
+        st.caption(f"Trading watchlist (decision cycle): "
+                  f"{', '.join(TRADING_WATCHLIST)}")
     with st.expander("CONFIGURATION", expanded=True):
         st.caption(f"Paper capital · ${cfg.starting_cash:,.0f}")
         rp = st.slider("Risk per position %", 0.5, 3.0, 1.0, 0.25)
@@ -284,21 +315,27 @@ with st.sidebar:
         st.caption("Decision cycle every 5min (market open only) · "
                    "morning briefing 9:25 ET · daily report 16:05 ET")
     st.write("")
-    run = st.button("▷  RUN DECISION CYCLE", type="primary",
-                    use_container_width=True)
+    # P9: the scheduler is the primary path now (fires every 5min during
+    # market hours, see SCHEDULER expander above) -- this button is a
+    # manual override for testing/impatience, no longer required for
+    # normal operation, so it's de-emphasized (no more `type="primary"`).
+    run = st.button("⚡ Force cycle now", use_container_width=True,
+                    help="Manual override — the scheduler already runs "
+                         "this automatically every 5 minutes during "
+                         "market hours.")
+    render_cycle_countdown()
 
     # BUG FIX 3 + auto-feed: start once on app load, no button press
     # needed. _autostart_feed is st.cache_resource (process-wide, runs
     # exactly once); the session_state flag just tracks it for this
-    # browser session's status caption below.
+    # browser session's status caption below. feed.symbols is the fixed
+    # universe baked in at construction (get_engine) — nothing to
+    # refresh here anymore, unlike the old user-typed watchlist.
     if "feed_auto_started" not in st.session_state:
-        st.session_state.feed_auto_started = _autostart_feed(feed, symbols)
-    else:
-        feed.symbols = symbols                # keep it current on edits
+        st.session_state.feed_auto_started = _autostart_feed(feed)
 
     fc1, fc2 = st.columns(2)
     if fc1.button("▶ Feed", use_container_width=True):
-        feed.symbols = symbols
         feed.start()
         st.rerun()
     if fc2.button("⏹ Stop", use_container_width=True):
@@ -308,11 +345,15 @@ with st.sidebar:
     if throttle and throttle.get("retry_at", 0) > time.time():
         st.caption(f"🟠 throttled — retrying at "
                    f"{time.strftime('%H:%M:%S', time.localtime(throttle['retry_at']))}"
-                   f" · {len(symbols)} symbols · {feed.interval_s}s")
+                   f" · universe {len(universe)} symbols · {feed.interval_s}s")
     else:
         st.caption(("🟢 feed running (auto)" if feed.running else
                    "⚫ feed stopped") +
-                  f" · {len(symbols)} symbols · {feed.interval_s}s")
+                  f" · universe {len(universe)} symbols · {feed.interval_s}s")
+    scan_prog = state.get("feed.universe_scan_progress")
+    if scan_prog:
+        st.caption(f"Scanned {scan_prog['scanned']}/{scan_prog['total']} "
+                  f"symbols this cycle")
 
 E["risk"].cfg = dataclasses.replace(
     cfg, aum=aum_in, max_position_mode=mode_val,
@@ -433,7 +474,7 @@ st.markdown(f"""
 
 if run:
     with st.spinner("Research → propose → risk review → execute…"):
-        for s_ in symbols:
+        for s_ in TRADING_WATCHLIST:
             orch.research(s_)
             if news_pass and cfg.news_api_key:
                 orch.scan_news(s_)
@@ -443,8 +484,8 @@ if run:
         if macro_pass and cfg.lse_api_key:
             orch.scan_macro()
             orch.scan_flow(chart_sym)
-        new_fills = orch.step(symbols, risk_pct=rp)
-    st.toast(f"Cycle complete — {len(new_fills)} fill(s) · research + "
+        new_fills = orch.step(TRADING_WATCHLIST, risk_pct=rp)
+    st.toast(f"Forced cycle complete — {len(new_fills)} fill(s) · research + "
              f"news/macro/flow in AUDIT")
 
 # ---------------------------------------------------------------------------
@@ -679,7 +720,8 @@ with t_lab:
     st.markdown("### 🎯 Sector & Target Scan")
     if st.button("Scan sectors & targets", use_container_width=True):
         with st.spinner("Scanning watchlist × verdict × tilts…"):
-            scan = orch.sector_scan(symbols, account=broker.equity(marks),
+            scan = orch.sector_scan(TRADING_WATCHLIST,
+                                    account=broker.equity(marks),
                                     risk_pct=rp)
         if not scan:
             st.info("Not enough history on the watchlist symbols yet — "
@@ -820,14 +862,15 @@ with t_lab:
             st.caption(f"{stress['n_paths']:,} paths · {stress['horizon_days']}d "
                        f"horizon · starting value ${stress['starting_value_$']:,.0f} "
                        f"· 95% CVaR ${stress['cvar95_$']:,.0f}")
-            st.caption("Feeds into RUN DECISION CYCLE automatically: this "
-                       "result is cached and applied to every new entry's "
-                       "sizing until the next time this test runs.")
+            st.caption("Feeds into every decision cycle (auto or forced) "
+                       "automatically: this result is cached and applied "
+                       "to every new entry's sizing until the next time "
+                       "this test runs.")
 
     st.markdown("### 📋 Daily Institutional Report (P7h)")
     if st.button("Generate today's report", use_container_width=True):
         with st.spinner("Assembling P&L, risk, signal quality, candidates…"):
-            rep = orch.daily_report(watchlist=symbols)
+            rep = orch.daily_report(watchlist=TRADING_WATCHLIST)
         st.success(f"Saved to `{rep['path']}`")
         st.markdown(rep["markdown"])
         st.download_button("Download markdown", rep["markdown"],

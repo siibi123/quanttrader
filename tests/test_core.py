@@ -1105,6 +1105,10 @@ st5 = sched.status()
 check("scheduler: start() registers all three jobs",
       st5["running"] and {j["id"] for j in st5["jobs"]} ==
       {"decision_cycle", "morning_briefing", "daily_report"})
+check("scheduler: next_run() returns a real datetime for a live job, "
+      "None for an unknown one",
+      sched.next_run("decision_cycle") is not None
+      and sched.next_run("nonexistent_job") is None)
 
 _orig_ms = _sched_mod.market_status
 _sched_mod.market_status = lambda: {"session": "closed"}

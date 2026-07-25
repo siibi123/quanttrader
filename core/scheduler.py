@@ -85,6 +85,15 @@ class TradingScheduler:
             self.scheduler.shutdown(wait=False)
             self._started = False
 
+    def next_run(self, job_id: str):
+        """The job's next_run_time (a tz-aware datetime) or None if the
+        scheduler isn't running or the job doesn't exist -- used for the
+        sidebar's live countdown."""
+        if not self._started:
+            return None
+        job = self.scheduler.get_job(job_id)
+        return job.next_run_time if job else None
+
     def status(self) -> dict:
         if not self._started:
             return {"running": False, "jobs": []}
