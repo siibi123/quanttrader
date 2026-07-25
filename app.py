@@ -11,12 +11,13 @@ import streamlit as st
 
 from ai.orchestrator import RuleOrchestrator, TOOL_SCHEMAS
 from core.engine import AuditLog, PaperBroker, RiskEngine
-from core.state import Config, EventBus, GlobalState
+from core.state import Config, EventBus, GlobalState, market_status
 from core.circuit_breaker import DrawdownCircuitBreaker
+from core.scheduler import TradingScheduler
 from core.strategy_registry import MIN_SIGNALS_TO_PROMOTE, StrategyRegistry
 from data.news import NewsProvider
 from data.providers import (CompositeProvider, LSEProvider, PollingFeed,
-                            YahooProvider)
+                            YahooProvider, filter_price_outliers)
 
 st.set_page_config(page_title="QuantTrader", page_icon="◆", layout="wide",
                    initial_sidebar_state="expanded")
@@ -96,14 +97,24 @@ def get_engine():
     orch = RuleOrchestrator(bus, state, audit, risk, broker, provider,
                             news=news, lse=lse, registry=registry,
                             circuit_breaker=circuit_breaker)
-    feed = PollingFeed(bus, state, provider,
-                       ["SPY", "QQQ", "AAPL", "NVDA"], interval_s=45)
+    default_watchlist = ["SPY", "QQQ", "AAPL", "NVDA"]
+    feed = PollingFeed(bus, state, provider, default_watchlist,
+                       interval_s=30)
+    # symbols_fn/risk_pct_fn are callables, not fixed values, so the
+    # scheduler's background thread always sees whatever the sidebar
+    # currently has set (state.ui.watchlist/ui.risk_pct), not a snapshot
+    # frozen at process start.
+    scheduler = TradingScheduler(
+        orch,
+        symbols_fn=lambda: state.get("ui.watchlist") or default_watchlist,
+        risk_pct_fn=lambda: state.get("ui.risk_pct") or 1.0)
+    scheduler.start()
     state.set("session", {"started": time.strftime(
         "%Y-%m-%d %H:%M UTC", time.gmtime())})
     return dict(cfg=cfg, bus=bus, state=state, audit=audit, lse=lse,
                 news=news, provider=provider, broker=broker, risk=risk,
                 registry=registry, circuit_breaker=circuit_breaker,
-                orch=orch, feed=feed)
+                orch=orch, feed=feed, scheduler=scheduler)
 
 
 E = get_engine()
@@ -111,7 +122,18 @@ cfg, state, audit = E["cfg"], E["state"], E["audit"]
 broker, risk, orch, feed = E["broker"], E["risk"], E["orch"], E["feed"]
 registry = E["registry"]
 circuit_breaker = E["circuit_breaker"]
+scheduler = E["scheduler"]
 quotes = state.get("quotes") or {}
+
+
+@st.cache_resource
+def _autostart_feed(_feed, _symbols):
+    """Process-wide singleton starter: the decorated body only ever runs
+    once per process (st.cache_resource), so the feed starts exactly
+    once no matter how many browser sessions/reruns hit this line."""
+    _feed.symbols = _symbols
+    _feed.start()
+    return True
 
 # ---------------------------------------------------------------------------
 # LEFT RAIL
@@ -127,9 +149,14 @@ with st.sidebar:
         symbols = [s.strip().upper() for s in wl.split(",") if s.strip()]
         chart_sym = st.selectbox("Chart symbol", symbols or ["SPY"])
         tf = st.select_slider("Timeframe", ["1h", "1d", "1wk"], value="1d")
+    # keeps the scheduler's background thread (a separate thread, not a
+    # script rerun) reading the CURRENT watchlist rather than whatever
+    # was set at process start
+    state.set("ui.watchlist", symbols, source="ui")
     with st.expander("CONFIGURATION", expanded=True):
         st.caption(f"Paper capital · ${cfg.starting_cash:,.0f}")
         rp = st.slider("Risk per position %", 0.5, 3.0, 1.0, 0.25)
+        state.set("ui.risk_pct", rp, source="ui")
         deep = st.toggle("Options greeks pass (LSE)",
                          value=bool(cfg.lse_api_key),
                          disabled=not cfg.lse_api_key,
@@ -247,9 +274,28 @@ with st.sidebar:
                 st.json(E["lse"].usage() or {"note": "no response"})
         else:
             st.caption("⚪ Yahoo only — add LSE_API_KEY in Secrets/.env")
+    with st.expander("SCHEDULER (P8)", expanded=False):
+        sst = scheduler.status()
+        if sst["running"]:
+            for j in sst["jobs"]:
+                st.caption(f"🟢 {j['id']} · next run {j['next_run'] or '—'}")
+        else:
+            st.caption("⚫ not running")
+        st.caption("Decision cycle every 5min (market open only) · "
+                   "morning briefing 9:25 ET · daily report 16:05 ET")
     st.write("")
     run = st.button("▷  RUN DECISION CYCLE", type="primary",
                     use_container_width=True)
+
+    # BUG FIX 3 + auto-feed: start once on app load, no button press
+    # needed. _autostart_feed is st.cache_resource (process-wide, runs
+    # exactly once); the session_state flag just tracks it for this
+    # browser session's status caption below.
+    if "feed_auto_started" not in st.session_state:
+        st.session_state.feed_auto_started = _autostart_feed(feed, symbols)
+    else:
+        feed.symbols = symbols                # keep it current on edits
+
     fc1, fc2 = st.columns(2)
     if fc1.button("▶ Feed", use_container_width=True):
         feed.symbols = symbols
@@ -258,23 +304,95 @@ with st.sidebar:
     if fc2.button("⏹ Stop", use_container_width=True):
         feed.stop()
         st.rerun()
-    st.caption(("🟢 feed running" if feed.running else "⚫ feed stopped") +
-               f" · {len(symbols)} symbols · {feed.interval_s}s")
+    throttle = state.get("feed.throttled")
+    if throttle and throttle.get("retry_at", 0) > time.time():
+        st.caption(f"🟠 throttled — retrying at "
+                   f"{time.strftime('%H:%M:%S', time.localtime(throttle['retry_at']))}"
+                   f" · {len(symbols)} symbols · {feed.interval_s}s")
+    else:
+        st.caption(("🟢 feed running (auto)" if feed.running else
+                   "⚫ feed stopped") +
+                  f" · {len(symbols)} symbols · {feed.interval_s}s")
 
 E["risk"].cfg = dataclasses.replace(
     cfg, aum=aum_in, max_position_mode=mode_val,
     max_position_pct=pct_cap_in, max_position_fixed_usd=fixed_cap_in)
 
+
+@st.fragment(run_every=1)
+def render_header_clock():
+    """REAL-TIME ITEM 6: live ET clock + market session badge, ticking
+    once a second independent of the rest of the page."""
+    ms = market_status()
+    badge = {"open": "🟢", "pre": "🟡", "after": "🟡",
+             "closed": "⚫"}.get(ms["session"], "⚫")
+    st.markdown(
+        f"<div style='text-align:right; font-family:\"IBM Plex Mono\","
+        f"monospace; font-size:.8rem; color:#a1a1aa;'>"
+        f"{badge} {ms['label']} · {ms['et_time'].strftime('%H:%M:%S')} ET"
+        f"</div>", unsafe_allow_html=True)
+
+
+@st.fragment(run_every=30)
+def render_quote_strip():
+    """REAL-TIME ITEM 1: the watchlist quote strip, refreshing every 30s
+    off GlobalState directly — PollingFeed's background thread keeps
+    state.quotes current independent of any Streamlit rerun, so this
+    fragment must re-read state itself rather than close over the
+    module-level `quotes` snapshot from the last full script run."""
+    q_now = state.get("quotes") or {}
+    if q_now:
+        qc = st.columns(min(len(q_now), 6))
+        for col, (s_, q) in zip(qc, list(q_now.items())[:6]):
+            col.metric(s_, f"{q.get('price', 0):,.2f}",
+                      f"{q.get('chg_pct', 0):+.2f}%")
+        st.caption(f"Last updated {time.strftime('%H:%M:%S')}")
+    else:
+        st.caption("No quotes yet — feed starting…")
+
+
+@st.fragment(run_every=60)
+def render_open_book():
+    """REAL-TIME ITEM 2: open-position mark-to-market, refreshing every
+    60s off GlobalState directly (same reasoning as render_quote_strip —
+    a fragment timer fires without a full script rerun)."""
+    q_now = state.get("quotes") or {}
+    marks_now = {t: q.get("price", 0) for t, q in q_now.items()}
+    if broker.positions:
+        eq_now = broker.equity(marks_now)
+        exposure_basis = aum_in if aum_in > 0 else eq_now
+        rows = [{"ticker": t, "qty": p["qty"],
+                "avg": round(p["avg_price"], 2),
+                "mark": marks_now.get(t, "—"),
+                "P&L $": round((marks_now.get(t, p["avg_price"]) -
+                                p["avg_price"]) * p["qty"], 0),
+                "% of AUM": round(p["qty"] * marks_now.get(t, p["avg_price"])
+                                  / exposure_basis * 100, 1)
+                if exposure_basis > 0 else "—"}
+               for t, p in broker.positions.items()]
+        st.dataframe(pd.DataFrame(rows), use_container_width=True,
+                    hide_index=True)
+        st.caption(f"Exposure basis: ${exposure_basis:,.0f} "
+                  f"({'declared AUM' if aum_in > 0 else 'live paper equity'})"
+                  f" · updated {time.strftime('%H:%M:%S')}")
+    else:
+        st.caption("Flat.")
+
+
 # ---------------------------------------------------------------------------
 # NAV + LSE-style STATS STRIP: TRADES · WIN% · PF · P&L · DD · SR
 # ---------------------------------------------------------------------------
-st.markdown("""
-<div class="qt-nav">
- <div><span class="qt-logo">◆ Quant<span style="color:#22c55e">Trader</span></span>
- <span class="qt-sub"> MARKET INTELLIGENCE</span></div>
- <span class="qt-link active">Terminal</span><span class="qt-link">Data</span>
- <span class="qt-link">AI Core</span><span class="qt-link">Docs</span>
-</div>""", unsafe_allow_html=True)
+nav_l, nav_r = st.columns([4, 1])
+with nav_l:
+    st.markdown("""
+    <div class="qt-nav">
+     <div><span class="qt-logo">◆ Quant<span style="color:#22c55e">Trader</span></span>
+     <span class="qt-sub"> MARKET INTELLIGENCE</span></div>
+     <span class="qt-link active">Terminal</span><span class="qt-link">Data</span>
+     <span class="qt-link">AI Core</span><span class="qt-link">Docs</span>
+    </div>""", unsafe_allow_html=True)
+with nav_r:
+    render_header_clock()
 
 marks = {t: q.get("price", 0) for t, q in quotes.items()}
 eq = broker.equity(marks)
@@ -339,6 +457,7 @@ with t_chart:
     iv = {"1h": ("1h", "720d"), "1d": ("1d", "2y"),
           "1wk": ("1wk", "10y")}[tf]
     df = E["provider"].get_candles(chart_sym, interval=iv[0], lookback=iv[1])
+    df = filter_price_outliers(df)         # BUG FIX 2: drop vendor-data spikes
     if len(df):
         fig = go.Figure(go.Candlestick(
             x=df.index, open=df["Open"], high=df["High"], low=df["Low"],
@@ -385,15 +504,12 @@ with t_chart:
             st.markdown(f"<div class='qt-panel'>🎯 <b>{chart_sym}</b> · "
                         + " &nbsp;|&nbsp; ".join(line) + "</div>",
                         unsafe_allow_html=True)
+        st.caption(f"Last updated {time.strftime('%H:%M:%S')}")
     else:
         st.info(f"No data for {chart_sym} — throttled or bad symbol.")
 
 with t_metrics:
-    if quotes:
-        qc = st.columns(min(len(quotes), 6))
-        for col, (s_, q) in zip(qc, list(quotes.items())[:6]):
-            col.metric(s_, f"{q.get('price', 0):,.2f}",
-                       f"{q.get('chg_pct', 0):+.2f}%")
+    render_quote_strip()
     for title, key in (("Signals", "signals"), ("Research", "research"),
                        ("Options (greeks distilled)", "options")):
         d = state.get(key) or {}
@@ -436,29 +552,14 @@ with t_metrics:
     if not (state.get("signals") or state.get("research")):
         st.caption("Run a decision cycle to populate.")
     st.caption(f"AI contract: {len(TOOL_SCHEMAS)} tools · LLM socket awaits "
-               "ANTHROPIC_API_KEY · every call risk-reviewed.")
+               "ANTHROPIC_API_KEY · every call risk-reviewed. Signals/"
+               f"research/options updated {time.strftime('%H:%M:%S')}.")
 
 with t_trades:
     c1, c2 = st.columns([1, 1.3])
     with c1:
         st.markdown("### Open book")
-        if broker.positions:
-            exposure_basis = aum_in if aum_in > 0 else eq
-            rows = [{"ticker": t, "qty": p["qty"],
-                     "avg": round(p["avg_price"], 2),
-                     "mark": marks.get(t, "—"),
-                     "P&L $": round((marks.get(t, p["avg_price"]) -
-                                     p["avg_price"]) * p["qty"], 0),
-                     "% of AUM": round(p["qty"] * marks.get(t, p["avg_price"])
-                                       / exposure_basis * 100, 1)
-                     if exposure_basis > 0 else "—"}
-                    for t, p in broker.positions.items()]
-            st.dataframe(pd.DataFrame(rows), use_container_width=True,
-                         hide_index=True)
-            st.caption(f"Exposure basis: ${exposure_basis:,.0f} "
-                       f"({'declared AUM' if aum_in > 0 else 'live paper equity'})")
-        else:
-            st.caption("Flat.")
+        render_open_book()
     bk = state.get("risk.book") or {}
     if bk:
         warn = bk.get("warning")
