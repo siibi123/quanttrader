@@ -31,7 +31,7 @@ from quant.anomaly_library import match_anomalies
 from quant.flow_confluence import confluence
 from quant.playbook import build_playbook
 from quant.correlation_monitor import CORRELATION_POLICY, correlation_regime
-from quant.daily_report import render_report
+from quant.daily_report import render_morning_briefing, render_report
 from quant.execution_quality import slippage_report
 from quant.portfolio_stress import risk_budget_from_stress, simulate_portfolio
 from quant.regime_gate import REGIME_POLICY, classify_regime
@@ -67,6 +67,21 @@ TOOL_SCHEMAS = [
          "symbols": {"type": "array", "items": {"type": "string"}}},
          "required": ["symbols"]}},
 ]
+
+
+def _cooldown_ok(state: GlobalState, key: str, min_interval_s: float) -> bool:
+    """Self-imposed pacing cap for expensive universe/chain fetches (rate-
+    limit protection) — distinct from PollingFeed's reactive Yahoo-throttle
+    backoff. True if `min_interval_s` has elapsed since the last call
+    tagged `key`; does NOT itself record a call, so a caller that decides
+    not to proceed (e.g. because it's returning a cached result) doesn't
+    reset the clock."""
+    last = state.get(f"_ratelimit.{key}")
+    return last is None or time.time() - last >= min_interval_s
+
+
+def _mark_ran(state: GlobalState, key: str) -> None:
+    state.set(f"_ratelimit.{key}", time.time(), source="ratelimit")
 
 
 class RuleOrchestrator:
@@ -585,6 +600,54 @@ class RuleOrchestrator:
             data={"path": path})
         return out
 
+    def morning_briefing(self, watchlist: list[str] | None = None,
+                         reports_dir: str = "reports") -> dict:
+        """P8: pre-open snapshot -> reports/YYYY-MM-DD_morning.md — risk
+        status (drawdown circuit breaker, correlation regime), a per-
+        symbol regime read, and today's ranked candidates (sector_scan).
+        Fired by the scheduler at 9:25 ET; read-only, nothing here
+        executes a trade."""
+        today = time.strftime("%Y-%m-%d")
+        marks = {t: (self._state.get(f"quotes.{t}") or {}).get(
+                    "price", p["avg_price"])
+                for t, p in self._broker.positions.items()}
+        equity = self._broker.equity(marks)
+        cb = self._circuit_breaker.status() if self._circuit_breaker else None
+        corr = self._state.get("correlation_regime")
+
+        regimes: dict[str, str] = {}
+        candidates: list = []
+        notes: list[str] = []
+        if watchlist:
+            for s in watchlist:
+                regimes[s] = self._regime_gate(s)["regime"]
+            scan = self.sector_scan(watchlist, account=equity)
+            candidates = scan.get("names", [])
+        else:
+            notes.append("No watchlist passed — regime reads and "
+                        "candidate scan skipped this run.")
+
+        data = {"date": today, "equity": equity, "circuit_breaker": cb,
+               "correlation_regime": corr, "regimes": regimes,
+               "candidates": candidates, "notes": notes}
+        md = render_morning_briefing(data)
+
+        os.makedirs(reports_dir, exist_ok=True)
+        path = os.path.join(reports_dir, f"{today}_morning.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(md)
+
+        out = {"path": path, "markdown": md, **data}
+        self._state.set("morning_briefing", {"path": path, "date": today},
+                        source="research")
+        self._audit.record(
+            "Research", "MORNING BRIEFING", model="morning_briefing (P8)",
+            reasoning=(f"Morning briefing saved to {path}: equity "
+                      f"${equity:,.2f}, {len(candidates)} candidate(s) "
+                      f"ranked"),
+            data={"path": path})
+        return out
+
     def stress_test(self, horizon_days: int = 21, n_paths: int = 10_000) -> dict:
         """P7g: 10,000 correlated Monte Carlo paths of the CURRENT book
         (Ledoit-Wolf covariance, not independent per-symbol sims) ->
@@ -652,8 +715,20 @@ class RuleOrchestrator:
         option prints, and macro rate-trend readings are already cached in
         state (from scan_news/scan_flow/scan_macro — this does not fetch
         those itself). Sector comes from LSE company_profiles when the key
-        is set, else 'Unclassified' — never guessed."""
-        data = {s: self._provider.get_candles(s) for s in symbols}
+        is set, else 'Unclassified' — never guessed.
+
+        Rate-limited to once per 5 minutes (RATE LIMIT PROTECTION, P8):
+        this IS the "universe scan" — one fetch per watchlist symbol. A
+        repeat call inside the cooldown window returns the last cached
+        state.sector_scan instead of re-fetching."""
+        if not _cooldown_ok(self._state, "sector_scan", 300):
+            cached = self._state.get("sector_scan")
+            return {**cached, "throttled": True} if cached else {}
+        _mark_ran(self._state, "sector_scan")
+
+        batch_fn = getattr(self._provider, "get_candles_batch", None)
+        data = (batch_fn(symbols) if batch_fn else
+               {s: self._provider.get_candles(s) for s in symbols})
         data = {s: df for s, df in data.items() if len(df) >= 220}
         if not data:
             return {}

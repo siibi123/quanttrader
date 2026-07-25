@@ -187,6 +187,11 @@ class LSEProvider(DataProvider):
         self.key = api_key
         self.base = (base_url or self.VAULT).rstrip("/")
         self.working = bool(api_key)      # verified contract; key = enabled
+        # options_chain() rate-limit state (RATE LIMIT PROTECTION, P8):
+        # chains are the heaviest call in the SDK (full contract list +
+        # greeks), capped to once per 10 minutes per underlying.
+        self._chain_last_fetch: dict[str, float] = {}
+        self._chain_cache: dict[str, pd.DataFrame] = {}
 
     def _get(self, path: str, params: dict) -> list | dict | None:
         if not self.key:
@@ -252,11 +257,22 @@ class LSEProvider(DataProvider):
 
     def options_chain(self, underlying: str, max_dte: int | None = 45
                       ) -> pd.DataFrame:
-        """Current chain, one row per contract, WITH iv and greeks."""
+        """Current chain, one row per contract, WITH iv and greeks.
+
+        Rate-limited to once per 10 minutes per underlying (RATE LIMIT
+        PROTECTION, P8) — a repeat call inside the window returns the
+        last cached chain instead of hitting the vault again."""
+        now = time.time()
+        if (now - self._chain_last_fetch.get(underlying, 0) < 600
+                and underlying in self._chain_cache):
+            return self._chain_cache[underlying]
         rows = self._get("/options/chain",
                          {"underlying": underlying, "limit": 5000,
                           "max_dte": max_dte})
-        return pd.DataFrame(rows) if isinstance(rows, list) else pd.DataFrame()
+        out = pd.DataFrame(rows) if isinstance(rows, list) else pd.DataFrame()
+        self._chain_last_fetch[underlying] = now
+        self._chain_cache[underlying] = out
+        return out
 
     def usage(self) -> dict:
         return self._get("/usage", {}) or {}

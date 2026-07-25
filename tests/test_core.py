@@ -1010,6 +1010,73 @@ check("feed: repeated empty fetches set feed.throttled for a 2min backoff",
       state.get("feed.throttled") is not None
       and state.get("feed.throttled")["retry_at"] > time.time())
 
+# ---- 57. P8: sector_scan rate-limited to once per 5 minutes
+_scan5_again = orch5.sector_scan(["P5A", "P5B"], account=10000, risk_pct=1.0)
+check("sector_scan: immediate repeat call is throttled, returns cached result",
+      _scan5_again.get("throttled") is True
+      and _scan5_again.get("sectors") == state.get("sector_scan")["sectors"])
+
+# ---- 58. P8: LSEProvider.options_chain rate-limited to once per 10 minutes
+_chain_calls = {"n": 0}
+def _fake_chain_get(path, params):
+    if path == "/options/chain":
+        _chain_calls["n"] += 1
+        return [{"strike": 100, "type": "call", "iv": 0.2}]
+    return None
+lse6 = LSEProvider(api_key="dummy-key-for-test")
+lse6._get = _fake_chain_get
+_c1 = lse6.options_chain("AAPL")
+_c2 = lse6.options_chain("AAPL")
+check("lse: options_chain caps the vault to one fetch per 10min per underlying",
+      _chain_calls["n"] == 1 and len(_c1) == 1 and len(_c2) == 1)
+
+# ---- 59. P8: RuleOrchestrator.morning_briefing() wiring
+broker9 = PaperBroker(cfg, bus, state, audit, path="runtime/test_broker_p8m.json")
+orch15 = RuleOrchestrator(bus, state, audit, risk, broker9, FakeProvider())
+mb = orch15.morning_briefing(watchlist=None, reports_dir="runtime/test_reports")
+check("morning_briefing(): writes a real markdown file to the reports dir",
+      os.path.exists(mb["path"]) and mb["path"].endswith("_morning.md"))
+check("morning_briefing(): writes state.morning_briefing + an audit record",
+      state.get("morning_briefing") is not None
+      and any(r["action"] == "MORNING BRIEFING" for r in audit.tail(20)))
+
+# ---- 60. P8: TradingScheduler — job registration + market-hours gating
+from core.scheduler import TradingScheduler
+import core.scheduler as _sched_mod
+
+_sched_calls = {"n": 0}
+class _FakeOrchForSched:
+    def step(self, symbols, risk_pct=1.0):
+        _sched_calls["n"] += 1
+        return []
+    def daily_report(self, watchlist=None):
+        pass
+    def morning_briefing(self, watchlist=None):
+        pass
+
+sched = TradingScheduler(_FakeOrchForSched(), symbols_fn=lambda: ["AAPL"])
+check("scheduler: status() reports not running before start()",
+      sched.status() == {"running": False, "jobs": []})
+sched.start()
+st5 = sched.status()
+check("scheduler: start() registers all three jobs",
+      st5["running"] and {j["id"] for j in st5["jobs"]} ==
+      {"decision_cycle", "morning_briefing", "daily_report"})
+
+_orig_ms = _sched_mod.market_status
+_sched_mod.market_status = lambda: {"session": "closed"}
+sched._run_decision_cycle()
+check("scheduler: decision cycle no-ops outside market hours",
+      _sched_calls["n"] == 0)
+_sched_mod.market_status = lambda: {"session": "open"}
+sched._run_decision_cycle()
+check("scheduler: decision cycle runs when the market is open",
+      _sched_calls["n"] == 1)
+_sched_mod.market_status = _orig_ms
+sched.shutdown()
+check("scheduler: shutdown() stops cleanly",
+      sched.status()["running"] is False)
+
 print("\n" + "=" * 44)
 passed = sum(1 for _, ok in results if ok)
 print(f"QUANTTRADER CORE: {passed}/{len(results)} PASS")

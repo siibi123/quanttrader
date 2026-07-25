@@ -85,3 +85,65 @@ def render_report(data: dict) -> str:
         lines += ["## Notes", ""] + [f"- {n}" for n in d["notes"]]
 
     return "\n".join(lines) + "\n"
+
+
+def render_morning_briefing(data: dict) -> str:
+    """data keys: date, equity, circuit_breaker (status dict or None),
+    correlation_regime (dict or None), regimes (dict ticker -> regime
+    label), candidates (list from sector_scan's 'names'), notes (list of
+    str). Same pure-formatting boundary as render_report — no state/audit
+    access here, the caller (RuleOrchestrator.morning_briefing) gathers
+    everything first."""
+    d = data
+    lines = [f"# QuantTrader Morning Briefing — {d['date']}", ""]
+
+    lines += ["## Account", ""]
+    lines.append(f"Equity: ${d['equity']:,.2f}")
+    lines.append("")
+
+    lines += ["## Risk Status", ""]
+    cb = d.get("circuit_breaker")
+    if cb:
+        state_note = ("HALTED" if cb.get("halted") else
+                      "risk-reducing only" if cb.get("only_risk_reducing")
+                      else "normal")
+        lines.append(f"Drawdown circuit breaker: {cb.get('drawdown_pct', 0)}% "
+                    f"from peak ${cb.get('peak_equity', 0):,.0f} — {state_note}")
+    else:
+        lines.append("_No circuit breaker state yet (flat book)._")
+    cr = d.get("correlation_regime")
+    if cr:
+        lines.append(f"Correlation regime: {cr['verdict']} (avg pairwise "
+                    f"{cr['current_avg_correlation']})")
+    lines.append("")
+
+    lines += ["## Regime by Watchlist Symbol", ""]
+    regs = d.get("regimes") or {}
+    if regs:
+        lines.append("| Ticker | Regime |")
+        lines.append("|---|---|")
+        for t, r in regs.items():
+            lines.append(f"| {t} | {r} |")
+    else:
+        lines.append("_No regime reads yet._")
+    lines.append("")
+
+    lines += ["## Today's Candidates", ""]
+    lines.append("_Suggestions only — the same sector/target scan the LAB "
+                "tab uses; nothing here executes a trade._")
+    lines.append("")
+    if d["candidates"]:
+        lines.append("| Ticker | Verdict | Score | Entry | Stop | Target |")
+        lines.append("|---|---|---|---|---|---|")
+        for n in d["candidates"][:10]:
+            lines.append(f"| {n['ticker']} | {n['verdict']} | "
+                        f"{n['target_score']} | {n['entry']} | {n['stop']} | "
+                        f"{n['target']} |")
+    else:
+        lines.append("_No tradeable candidates ranked as of briefing time._")
+    lines.append("")
+
+    if d.get("notes"):
+        lines += ["## Notes", ""] + [f"- {n}" for n in d["notes"]]
+
+    return "\n".join(lines) + "\n"
