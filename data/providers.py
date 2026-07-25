@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-from core.state import Event, EventBus, GlobalState
+from core.state import Event, EventBus, GlobalState, market_status
 
 
 class DataProvider(ABC):
@@ -32,6 +32,52 @@ class DataProvider(ABC):
     def get_quote(self, symbol: str) -> dict: ...
 
 
+def _lookback_days(lookback: str) -> int:
+    """Parse a yfinance-style period string ("2y", "720d", "6mo", "10y",
+    "max") into an approximate day count, for client-side trimming."""
+    s = (lookback or "2y").strip().lower()
+    if s in ("max", ""):
+        return 36_500                      # ~100y, effectively unbounded
+    digits = "".join(c for c in s if c.isdigit())
+    n = int(digits) if digits else 0
+    if s.endswith("mo"):
+        return n * 31
+    if s.endswith("wk"):
+        return n * 7
+    if s.endswith("d"):
+        return n
+    if s.endswith("y"):
+        return n * 365
+    return n or 730
+
+
+def _trim_to_lookback(df: pd.DataFrame, lookback: str) -> pd.DataFrame:
+    """Defense-in-depth: cut a provider's response down to the requested
+    lookback window even if that provider's own API ignored the parameter
+    (LSEProvider's /candles only supports limit+order, no start/end filter
+    verified in the SDK — this is what was silently returning ~5000 bars
+    of history, e.g. AAPL back to 2008, when the chart asked for "2y")."""
+    if df.empty:
+        return df
+    cutoff = pd.Timestamp.now() - pd.Timedelta(days=_lookback_days(lookback))
+    return df[df.index >= cutoff]
+
+
+def filter_price_outliers(df: pd.DataFrame, window: int = 20,
+                          mult: float = 3.0) -> pd.DataFrame:
+    """Drop bars whose High/Low ratio blows out past `mult`x the rolling
+    `window`-day average of that ratio — catches bad-tick/vendor data
+    artifacts (the vertical-spike chart anomalies) without touching the
+    research/signal pipeline's bar count, which the engine's indicators
+    (e.g. the 200-day SMA gate) depend on. Chart-display use only."""
+    if df.empty or len(df) < window + 1:
+        return df
+    ratio = df["High"] / df["Low"].replace(0, np.nan)
+    roll_avg = ratio.rolling(window, min_periods=window).mean()
+    is_outlier = (ratio > roll_avg * mult).fillna(False)
+    return df[~is_outlier]
+
+
 # ---------------------------------------------------------------------------
 
 class YahooProvider(DataProvider):
@@ -41,6 +87,9 @@ class YahooProvider(DataProvider):
         import yfinance as yf
         for attempt in range(3):
             try:
+                # auto_adjust=False everywhere: Close must be the real,
+                # un-split-adjusted-away broker price, never Yahoo's
+                # dividend/split-adjusted "Adj Close" substituted in.
                 df = yf.Ticker(symbol).history(period=lookback,
                                                interval=interval,
                                                auto_adjust=False)
@@ -63,6 +112,37 @@ class YahooProvider(DataProvider):
                     "chg_pct": round((px / prev - 1) * 100, 2)}
         except Exception:
             return {}
+
+    def get_candles_batch(self, symbols: list[str], interval: str = "1d",
+                          lookback: str = "2y") -> dict[str, pd.DataFrame]:
+        """One yf.download() call for the whole universe instead of N
+        separate yf.Ticker(...).history() round-trips — the rate-limit
+        protection for universe/sector scans."""
+        import yfinance as yf
+        out: dict[str, pd.DataFrame] = {}
+        if not symbols:
+            return out
+        try:
+            raw = yf.download(tickers=" ".join(symbols), period=lookback,
+                              interval=interval, group_by="ticker",
+                              auto_adjust=False, threads=True,
+                              progress=False)
+        except Exception:
+            return out
+        if raw is None or raw.empty:
+            return out
+        for s in symbols:
+            try:
+                sub = raw[s] if len(symbols) > 1 else raw
+                sub = sub.rename(columns=str.title)
+                sub = sub[["Open", "High", "Low", "Close",
+                           "Volume"]].dropna()
+                sub.index = pd.to_datetime(sub.index).tz_localize(None)
+                if len(sub):
+                    out[s] = _trim_to_lookback(sub, lookback)
+            except Exception:
+                continue
+        return out
 
 
 class LSEProvider(DataProvider):
@@ -142,8 +222,13 @@ class LSEProvider(DataProvider):
         df = df.rename(columns={"open": "Open", "high": "High",
                                 "low": "Low", "close": "Close",
                                 "volume": "Volume"})
-        return df[["Open", "High", "Low", "Close",
-                   "Volume"]].astype(float).dropna().sort_index()
+        df = df[["Open", "High", "Low", "Close",
+                "Volume"]].astype(float).dropna().sort_index()
+        # the vault's /candles endpoint only supports limit+order, not a
+        # start/end filter (per the verified SDK contract above) — trim
+        # client-side so a "2y" request can't silently come back as the
+        # full 5000-bar history (this was the AAPL-back-to-2008 chart bug).
+        return _trim_to_lookback(df, lookback)
 
     def get_quote(self, symbol):
         live = self.get_candles(symbol, "1m")
@@ -270,6 +355,25 @@ class CompositeProvider(DataProvider):
                 return q
         return {}
 
+    def get_candles_batch(self, symbols: list[str], interval: str = "1d",
+                          lookback: str = "2y") -> dict[str, pd.DataFrame]:
+        """LSE has no documented batch/multi-symbol candles endpoint (the
+        verified SDK contract is per-symbol /candles only), so universe-
+        wide batching goes straight to Yahoo's single yf.download() call;
+        anything it didn't return falls back to the normal per-symbol
+        provider chain."""
+        out: dict[str, pd.DataFrame] = {}
+        yahoo = next((p for p in self.providers
+                     if isinstance(p, YahooProvider)), None)
+        if yahoo:
+            out = yahoo.get_candles_batch(symbols, interval, lookback)
+        for s in symbols:
+            if not len(out.get(s, pd.DataFrame())):
+                df = self.get_candles(s, interval, lookback)
+                if len(df):
+                    out[s] = df
+        return out
+
 
 # ---------------------------------------------------------------------------
 
@@ -282,10 +386,15 @@ class PollingFeed:
 
     def __init__(self, bus: EventBus, state: GlobalState,
                  provider: DataProvider, symbols: list[str],
-                 interval_s: int = 30):
+                 interval_s: int = 30, market_hours_gate: bool = True):
         self._bus, self._state, self._provider = bus, state, provider
         self.symbols = symbols
         self.interval_s = interval_s
+        # gate real network calls to pre/open/after sessions and skip
+        # entirely when the market's closed (rate-limit budget); tests
+        # that just want to verify tick delivery on FakeProvider pass
+        # False here since they don't care about real wall-clock hours.
+        self.market_hours_gate = market_hours_gate
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -309,12 +418,37 @@ class PollingFeed:
                     and not self._stop.is_set())
 
     def _run(self):
+        fail_count = 0
         while not self._stop.is_set():
+            if self.market_hours_gate:
+                if market_status()["session"] == "closed":
+                    # save rate-limit budget: no network calls while shut
+                    self._stop.wait(min(self.interval_s, 60))
+                    continue
+                throttle = self._state.get("feed.throttled")
+                if throttle and time.time() < throttle.get("retry_at", 0):
+                    self._stop.wait(self.interval_s)
+                    continue
+
+            got_any = False
             for s in list(self.symbols):
                 if self._stop.is_set():
                     break
                 q = self._provider.get_quote(s)
                 if q:
+                    got_any = True
                     self._state.set(f"quotes.{s}", q, source="feed")
                     self._bus.publish(Event("tick", q, source="feed"))
+
+            if got_any:
+                fail_count = 0
+                if self._state.get("feed.throttled"):
+                    self._state.set("feed.throttled", None, source="feed")
+            elif self.symbols:
+                fail_count += 1
+                if fail_count >= 2:                # 2 empty passes in a row
+                    self._state.set(
+                        "feed.throttled",
+                        {"since": time.time(), "retry_at": time.time() + 120},
+                        source="feed")
             self._stop.wait(self.interval_s)

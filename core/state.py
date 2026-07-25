@@ -16,7 +16,10 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime
+from datetime import time as _dtime
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 try:
     from dotenv import load_dotenv
@@ -69,6 +72,38 @@ class Config:
         default_factory=lambda: _env("RISK_MAX_POSITION_MODE", "pct"))  # "pct" | "fixed"
     max_position_fixed_usd: float = field(
         default_factory=lambda: float(_env("RISK_MAX_POSITION_FIXED_USD", "0")))
+
+
+# ---------------------------------------------------------------------------
+# Market hours
+# ---------------------------------------------------------------------------
+
+ET = ZoneInfo("America/New_York")
+
+
+def market_status(now: datetime | None = None) -> dict:
+    """Classify the current US-equity session in Eastern time: pre-market
+    (4:00-9:30), open (9:30-16:00), after-hours (16:00-20:00), else closed.
+
+    Honest limitation: weekday-only — there's no exchange holiday calendar
+    dependency in this platform, so a market holiday still reads as a
+    normal weekday session here. Good enough to gate polling/scheduling
+    cadence; not a substitute for a real trading calendar.
+    """
+    now_et = (now or datetime.now(ET)).astimezone(ET)
+    if now_et.weekday() >= 5:                      # Sat/Sun
+        return {"session": "closed", "label": "Closed (weekend)",
+                "et_time": now_et}
+    t = now_et.time()
+    if _dtime(9, 30) <= t < _dtime(16, 0):
+        session, label = "open", "Market Open"
+    elif _dtime(4, 0) <= t < _dtime(9, 30):
+        session, label = "pre", "Pre-Market"
+    elif _dtime(16, 0) <= t < _dtime(20, 0):
+        session, label = "after", "After-Hours"
+    else:
+        session, label = "closed", "Closed"
+    return {"session": session, "label": label, "et_time": now_et}
 
 
 # ---------------------------------------------------------------------------

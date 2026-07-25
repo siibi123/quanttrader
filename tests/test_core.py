@@ -7,9 +7,12 @@ shutil.rmtree("runtime", ignore_errors=True)
 import numpy as np
 import pandas as pd
 
-from core.state import Config, Event, EventBus, GlobalState
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from core.state import Config, Event, EventBus, GlobalState, market_status
 from core.engine import AuditLog, Order, PaperBroker, RiskEngine
-from data.providers import CompositeProvider, FakeProvider, LSEProvider, PollingFeed
+from data.providers import (CompositeProvider, FakeProvider, LSEProvider,
+                            PollingFeed, filter_price_outliers)
 from ai.orchestrator import LLMOrchestrator, RuleOrchestrator
 from quant.hmm_regime import fit_hmm
 from quant.kalman_pairs import kalman_hedge_ratio, pair_signal
@@ -113,7 +116,10 @@ except RuntimeError:
     check("llm: refuses without key", True)
 
 # ---- 8. Polling feed (fake provider, fast interval)
-feed = PollingFeed(bus, state, FakeProvider(), ["AAA", "BBB"], interval_s=1)
+# market_hours_gate=False: this test verifies tick-delivery thread
+# mechanics, not real wall-clock market hours (see P8 tests for that).
+feed = PollingFeed(bus, state, FakeProvider(), ["AAA", "BBB"], interval_s=1,
+                   market_hours_gate=False)
 n_before = len(bus.recent(200, "tick"))
 feed.start()
 time.sleep(2.5)
@@ -926,6 +932,83 @@ check("daily_report(): writes a real markdown file to the reports dir",
 check("daily_report(): writes state.daily_report + a DAILY REPORT audit record",
       state.get("daily_report") is not None
       and any(r["action"] == "DAILY REPORT" for r in audit.tail(20)))
+
+# ---- 52. P8: market_status — session boundaries in ET, weekday-only
+_ET = ZoneInfo("America/New_York")
+check("market_status: 10:00 ET Tuesday is Market Open",
+      market_status(datetime(2026, 7, 21, 10, 0, tzinfo=_ET))["session"] == "open")
+check("market_status: 8:00 ET Tuesday is Pre-Market",
+      market_status(datetime(2026, 7, 21, 8, 0, tzinfo=_ET))["session"] == "pre")
+check("market_status: 17:00 ET Tuesday is After-Hours",
+      market_status(datetime(2026, 7, 21, 17, 0, tzinfo=_ET))["session"] == "after")
+check("market_status: 2:00 ET Tuesday is Closed",
+      market_status(datetime(2026, 7, 21, 2, 0, tzinfo=_ET))["session"] == "closed")
+check("market_status: Saturday is Closed regardless of time",
+      market_status(datetime(2026, 7, 25, 10, 0, tzinfo=_ET))["session"] == "closed")
+
+# ---- 53. P8: filter_price_outliers — drops a High/Low ratio spike
+_rng15 = np.random.default_rng(21)
+_n15 = 60
+_close15 = 100 + np.cumsum(_rng15.normal(0, 0.5, _n15))
+_high15, _low15 = _close15 * 1.01, _close15 * 0.99
+_high15[40] = _close15[40] * 5.0              # injected spike: H/L blows out
+_df15 = pd.DataFrame({"Open": _close15, "High": _high15, "Low": _low15,
+                     "Close": _close15, "Volume": 1e6},
+                     index=pd.bdate_range("2024-01-01", periods=_n15))
+_filtered15 = filter_price_outliers(_df15)
+check("filter_price_outliers: drops the injected High/Low ratio spike",
+      _df15.index[40] not in _filtered15.index)
+check("filter_price_outliers: leaves every normal bar untouched",
+      len(_filtered15) == _n15 - 1)
+
+# ---- 54. P8: LSEProvider.get_candles trims to the requested lookback
+# even though the vault's /candles endpoint itself only supports
+# limit+order (no start/end filter) -- this was the AAPL-back-to-2008
+# chart bug: a "2y" request silently returned ~5000 bars of raw history.
+def _fake_get_wide(path, params):
+    if path == "/candles":
+        idx15 = pd.bdate_range(end=pd.Timestamp.now(), periods=3000)
+        return [{"timestamp": int(ts.timestamp()), "open": 100.0,
+                 "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1000}
+                for ts in idx15]
+    return None
+
+lse5 = LSEProvider(api_key="dummy-key-for-test")
+lse5._get = _fake_get_wide
+_wide = lse5.get_candles("AAPL", interval="1d", lookback="2y")
+check("lse: get_candles trims a 3000-bar vault response down to ~2y",
+      len(_wide) < 3000
+      and (pd.Timestamp.now() - _wide.index.min()).days <= 731)
+
+# ---- 55. P8: PollingFeed — market_hours_gate pauses network calls when closed
+import data.providers as _providers_mod
+_orig_market_status = _providers_mod.market_status
+_providers_mod.market_status = lambda: {"session": "closed", "label": "Closed",
+                                        "et_time": None}
+feed2 = PollingFeed(bus, state, FakeProvider(), ["ZZZFEED"], interval_s=1,
+                    market_hours_gate=True)
+n_before2 = len(bus.recent(200, "tick"))
+feed2.start()
+time.sleep(1.5)
+feed2.stop()
+n_after2 = len(bus.recent(200, "tick"))
+_providers_mod.market_status = _orig_market_status
+check("feed: market_hours_gate pauses network calls entirely when closed",
+      n_after2 == n_before2)
+
+# ---- 56. P8: PollingFeed — repeated empty fetches trip the throttle backoff
+class _EmptyProvider(FakeProvider):
+    def get_quote(self, symbol):
+        return {}
+
+feed3 = PollingFeed(bus, state, _EmptyProvider(), ["THROTTLESYM"], interval_s=1,
+                    market_hours_gate=False)
+feed3.start()
+time.sleep(2.5)
+feed3.stop()
+check("feed: repeated empty fetches set feed.throttled for a 2min backoff",
+      state.get("feed.throttled") is not None
+      and state.get("feed.throttled")["retry_at"] > time.time())
 
 print("\n" + "=" * 44)
 passed = sum(1 for _, ok in results if ok)
