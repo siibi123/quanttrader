@@ -27,11 +27,23 @@ log = logging.getLogger("quanttrader.scheduler")
 
 
 class TradingScheduler:
-    """Owns one BackgroundScheduler for the whole process. `symbols_fn`/
-    `risk_pct_fn` are callables (not fixed values) so sidebar edits take
-    effect on the next scheduled run without restarting the scheduler —
-    the app wires them to read GlobalState.get("ui.watchlist"/"ui.risk_pct"),
-    which the sidebar keeps current every rerun."""
+    """Owns one BackgroundScheduler for the whole process. All *_fn args
+    are callables (not fixed values) so sidebar edits take effect on the
+    next scheduled run without restarting the scheduler.
+
+    universe_fn: the full S&P500+Nasdaq100 scan universe (~550 symbols,
+    loaded ONCE at app startup and cached — see data.universe.load_universe
+    and app.py's get_engine()). This drives BOTH the decision cycle (every
+    new-entry/exit signal in the whole universe gets evaluated, not just a
+    hand-picked few) and sector_scan's candidate ranking in the daily
+    report / morning briefing.
+
+    symbols_fn: a small set (open positions + whatever's on the CHART tab)
+    used only for the daily report / morning briefing's per-symbol regime
+    read — deliberately NOT run over the full universe, since that would
+    mean refitting quant.hmm_regime's HMM ~550 times in those reports too
+    (see RuleOrchestrator.step()'s own REGIME_REFIT_BUDGET_PER_CYCLE
+    comment for why that's expensive)."""
 
     def __init__(self, orch, symbols_fn, risk_pct_fn=lambda: 1.0,
                 bypass_incubation_fn=lambda: False, universe_fn=None):
@@ -39,11 +51,6 @@ class TradingScheduler:
         self._symbols_fn = symbols_fn
         self._risk_pct_fn = risk_pct_fn
         self._bypass_incubation_fn = bypass_incubation_fn
-        # universe_fn (P9 fix): the full S&P500+Nasdaq100 scan universe,
-        # used ONLY for sector_scan's candidate ranking inside the daily
-        # report / morning briefing -- NOT for the decision cycle, which
-        # keeps trading symbols_fn()'s small watchlist (see app.py's
-        # TRADING_WATCHLIST comment for why that split is deliberate).
         self._universe_fn = universe_fn or symbols_fn
         self.scheduler = BackgroundScheduler(timezone=ET)
         self._started = False
@@ -58,7 +65,7 @@ class TradingScheduler:
     def _run_decision_cycle(self):
         if market_status()["session"] != "open":
             return
-        symbols = self._symbols_fn()
+        symbols = self._universe_fn()
         if symbols:
             self._orch.step(symbols, risk_pct=self._risk_pct_fn(),
                             bypass_incubation=self._bypass_incubation_fn())

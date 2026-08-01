@@ -26,12 +26,14 @@ st.set_page_config(page_title="QuantTrader", page_icon="◆", layout="wide",
 
 ACCENT = "#22c55e"
 
-# P9: the decision cycle (real paper trades) stays on this small, explicit
-# watchlist -- deliberately NOT the full ~550-symbol universe below, which
-# only drives the feed's quote scanning. Screening the whole universe for
-# tradeable setups every 5 minutes is a real, separate feature (universe
-# pre-filter / scanner.scan_setups wiring) that hasn't been requested.
-TRADING_WATCHLIST = ["SPY", "QQQ", "AAPL", "NVDA"]
+# P9 amendment (owner, 2026-08-02): the decision cycle now evaluates the
+# FULL loaded universe (~550 S&P500+Nasdaq100 symbols, see get_engine()'s
+# `universe`), not a small hardcoded watchlist -- RuleOrchestrator.step()
+# batches candle fetches and budgets/caches the P7c regime-HMM refit per
+# cycle to make that affordable (see step()'s own docstring/comments).
+# The sidebar's "Chart symbol" input ONLY controls what the CHART tab
+# displays; it plays no role in what gets scanned or traded.
+DEFAULT_CHART_SYMBOL = "AAPL"
 st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=IBM+Plex+Mono:wght@400;600&display=swap');
@@ -107,34 +109,40 @@ def get_engine():
                             news=news, lse=lse, registry=registry,
                             circuit_breaker=circuit_breaker)
     # P9: fetch-once-and-cache S&P 500 + Nasdaq-100 universe (~550
-    # symbols) -- the feed scans ALL of it; the decision cycle keeps
-    # trading only TRADING_WATCHLIST (see module-level comment above).
+    # symbols), loaded a single time here (get_engine is @st.cache_resource
+    # -- runs once per process) and held in this `universe` list for the
+    # rest of the process's life. Both the feed AND the decision cycle
+    # (via scheduler.universe_fn below) read this same cached list --
+    # neither ever calls load_universe() again mid-session.
     universe = load_universe()
+    # priority_fn/symbols_fn/universe_fn are callables (not fixed values)
+    # so sidebar edits (chart symbol, risk %, bypass toggle) take effect
+    # on the next tick/cycle without restarting the feed or scheduler.
     feed = PollingFeed(
         bus, state, provider, universe, interval_s=30,
         priority_fn=lambda: sorted(set(broker.positions) |
-                                   set(TRADING_WATCHLIST)),
+                                   {state.get("ui.chart_symbol")
+                                    or DEFAULT_CHART_SYMBOL}),
         batch_size=50)
-    # risk_pct_fn is a callable, not a fixed value, so the scheduler's
-    # background thread always sees whatever the sidebar currently has
-    # set (state.ui.risk_pct), not a snapshot frozen at process start.
     scheduler = TradingScheduler(
         orch,
-        symbols_fn=lambda: TRADING_WATCHLIST,
+        # small regime-read set for the daily report/morning briefing
+        # only (see TradingScheduler's docstring) -- NOT what gets traded.
+        symbols_fn=lambda: sorted(set(broker.positions) |
+                                  {state.get("ui.chart_symbol")
+                                   or DEFAULT_CHART_SYMBOL}),
         risk_pct_fn=lambda: state.get("ui.risk_pct") or 1.0,
         # P7a bypass default ON (see sidebar STRATEGY PROMOTION expander):
         # with zero signal history the gate would otherwise block every
         # entry forever, so the system trades from day one until the
         # owner turns it off.
         bypass_incubation_fn=lambda: state.get("ui.bypass_incubation", True),
-        # sector_scan's candidate ranking (morning briefing/daily report)
-        # scans the full universe, not just TRADING_WATCHLIST -- see
-        # module comment above; the decision cycle itself is unaffected.
+        # the decision cycle AND sector_scan's candidate ranking both
+        # scan this same cached full universe.
         universe_fn=lambda: universe)
     scheduler.start()
     state.set("session", {"started": time.strftime(
         "%Y-%m-%d %H:%M UTC", time.gmtime())})
-    state.set("ui.watchlist", TRADING_WATCHLIST, source="ui")
     return dict(cfg=cfg, bus=bus, state=state, audit=audit, lse=lse,
                 news=news, provider=provider, broker=broker, risk=risk,
                 registry=registry, circuit_breaker=circuit_breaker,
@@ -188,11 +196,15 @@ with st.sidebar:
     st.write("")
     with st.expander("INSTRUMENT", expanded=True):
         chart_sym = (st.text_input(
-            "Chart symbol (feed always scans full universe)",
-            "AAPL").strip().upper() or "AAPL")
+            "Chart symbol (type any ticker)",
+            DEFAULT_CHART_SYMBOL).strip().upper() or DEFAULT_CHART_SYMBOL)
+        state.set("ui.chart_symbol", chart_sym, source="ui")
         tf = st.select_slider("Timeframe", ["1h", "1d", "1wk"], value="1d")
-        st.caption(f"Trading watchlist (decision cycle): "
-                  f"{', '.join(TRADING_WATCHLIST)}")
+        st.caption("This only picks what the CHART tab displays — the "
+                  "decision cycle always scans the full universe below, "
+                  "regardless of this symbol.")
+        st.caption(f"Decision cycle universe: {len(E['universe']):,} "
+                  f"symbols (S&P 500 + Nasdaq-100)")
     with st.expander("CONFIGURATION", expanded=True):
         st.caption(f"Paper capital · ${cfg.starting_cash:,.0f}")
         rp = st.slider("Risk per position %", 0.5, 3.0, 1.0, 0.25)
@@ -205,7 +217,7 @@ with st.sidebar:
         news_pass = st.toggle("News + sentiment pass (Finnhub)",
                               value=bool(cfg.news_api_key),
                               disabled=not cfg.news_api_key,
-                              help="Headlines + sentiment per watchlist "
+                              help="Headlines + sentiment for the chart "
                                    "symbol each cycle")
         macro_pass = st.toggle("Macro + flow pass (LSE)",
                                value=bool(cfg.lse_api_key),
@@ -495,18 +507,22 @@ st.markdown(f"""
 </div>""", unsafe_allow_html=True)
 
 if run:
-    with st.spinner("Research → propose → risk review → execute…"):
-        for s_ in TRADING_WATCHLIST:
-            orch.research(s_)
-            if news_pass and cfg.news_api_key:
-                orch.scan_news(s_)
+    with st.spinner(f"Scanning {len(E['universe']):,} symbols → "
+                    f"propose → risk review → execute…"):
+        # research()/scan_news() are chart-symbol-scoped display features
+        # (CHART/METRICS tabs), unrelated to the universe-wide decision
+        # cycle below -- see the sidebar's "This only picks what the
+        # CHART tab displays" caption.
+        orch.research(chart_sym)
+        if news_pass and cfg.news_api_key:
+            orch.scan_news(chart_sym)
         if deep and cfg.lse_api_key:
             orch.ingest_chain(chart_sym,
                               E["lse"].options_chain(chart_sym))
         if macro_pass and cfg.lse_api_key:
             orch.scan_macro()
             orch.scan_flow(chart_sym)
-        new_fills = orch.step(TRADING_WATCHLIST, risk_pct=rp,
+        new_fills = orch.step(E["universe"], risk_pct=rp,
                               bypass_incubation=bypass_gate)
     st.toast(f"Forced cycle complete — {len(new_fills)} fill(s) · research + "
              f"news/macro/flow in AUDIT")
@@ -590,7 +606,22 @@ def _readable_cell(v):
 
 with t_metrics:
     render_quote_strip()
-    for title, key in (("Signals", "signals"), ("Research", "research"),
+    sig_d = state.get("signals") or {}
+    if sig_d:
+        st.markdown("### Signals")
+        # step() now scans the full universe every cycle, so state.signals
+        # holds one entry per symbol WITH enough history -- most of them
+        # NONE (no setup today). Show only the actionable ones (BUY/SELL)
+        # so 12 real signals out of 550 scanned don't drown in noise.
+        non_none = {s: v for s, v in sig_d.items() if v.get("signal") != "NONE"}
+        st.caption(f"{len(non_none)} non-NONE signal(s) out of "
+                  f"{len(sig_d)} symbols scanned with enough history.")
+        if non_none:
+            rows = [{k: _readable_cell(v) for k, v in row.items()}
+                   for row in non_none.values()]
+            st.dataframe(pd.DataFrame(rows),
+                         use_container_width=True, hide_index=True)
+    for title, key in (("Research", "research"),
                        ("Options (greeks distilled)", "options")):
         d = state.get(key) or {}
         if d:
@@ -918,7 +949,9 @@ with t_lab:
     st.markdown("### 📋 Daily Institutional Report (P7h)")
     if st.button("Generate today's report", use_container_width=True):
         with st.spinner("Assembling P&L, risk, signal quality, candidates…"):
-            rep = orch.daily_report(watchlist=TRADING_WATCHLIST)
+            rep = orch.daily_report(
+                watchlist=sorted(set(broker.positions) | {chart_sym}),
+                scan_universe=E["universe"])
         st.success(f"Saved to `{rep['path']}`")
         st.markdown(rep["markdown"])
         st.download_button("Download markdown", rep["markdown"],
@@ -928,7 +961,15 @@ with t_lab:
 
 with t_audit:
     st.markdown("### Audit timeline — trigger → model → reasoning")
-    tail = audit.tail(20)
+    last_scan = state.get("decision_cycle.last_scan")
+    if last_scan:
+        st.caption(f"🔎 Last decision cycle: scanning "
+                  f"{last_scan['n_symbols']:,} symbols · "
+                  f"{time.strftime('%H:%M:%S', time.localtime(last_scan['ts']))}")
+    # a universe-scale cycle can produce dozens of records in one pass
+    # (SIGNAL LOGGED/PROPOSE BUY/etc per symbol) -- a wider tail than the
+    # old 4-symbol-watchlist days gives more of that context on screen.
+    tail = audit.tail(50)
     if tail:
         for r in reversed(tail):
             veto = "VETO" in r["action"]

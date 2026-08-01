@@ -1,9 +1,10 @@
 """Trading universe (P9) — S&P 500 + Nasdaq-100 constituents, fetched once
 from their public Wikipedia tables and cached to disk. This is what
-PollingFeed scans for quotes; it is deliberately NOT what the decision
-cycle trades (that stays a small, explicit watchlist — see app.py's
-TRADING_WATCHLIST) — screening 550 names for tradeable setups every 5
-minutes is a real, separate feature the owner hasn't asked for yet.
+PollingFeed scans for quotes AND (2026-08-02 amendment) what
+RuleOrchestrator.step() evaluates every decision cycle — see app.py's
+get_engine() and CLAUDE.md's P9 amendment for how step() stays affordable
+at ~550-symbol scale (batched candle fetches, budgeted/cached regime
+refits).
 """
 from __future__ import annotations
 

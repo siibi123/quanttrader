@@ -2,7 +2,15 @@
 import dataclasses
 import os, sys, time, shutil
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-shutil.rmtree("runtime", ignore_errors=True)
+# ISOLATION: every test-created file lives under runtime/_test/, never at
+# runtime/'s own root (audit.jsonl, broker.json, strategy_registry.json,
+# circuit_breaker.json, universe.json) -- those are app.py's live paper-
+# trading state. AuditLog(bus)/PaperBroker(...) below with no `path=`
+# would otherwise resolve to the exact same defaults app.py uses, and
+# `shutil.rmtree("runtime")` used to delete the whole directory on every
+# test run -- on a dev machine that's also running the real app, that
+# wiped real trading/audit history. Never widen this back to "runtime".
+shutil.rmtree("runtime/_test", ignore_errors=True)
 
 import numpy as np
 import pandas as pd
@@ -44,7 +52,7 @@ def check(name, cond):
 cfg = Config()
 bus = EventBus()
 state = GlobalState(bus)
-audit = AuditLog(bus)
+audit = AuditLog(bus, path="runtime/_test/audit.jsonl")
 
 # ---- 1. Event bus
 got = []
@@ -67,7 +75,7 @@ check("state: AI context includes curated keys",
       "quotes" in ctx and "portfolio" in ctx and len(ctx) < 6001)
 
 # ---- 3. Paper broker accounting
-broker = PaperBroker(cfg, bus, state, audit)
+broker = PaperBroker(cfg, bus, state, audit, path="runtime/_test/broker.json")
 o = Order("AAPL", "BUY", 10, reason="test"); o.approved = True
 f1 = broker.execute(o, 100.0)
 check("broker: buy fills with slippage", f1 and f1["price"] > 100.0)
@@ -95,7 +103,7 @@ check("risk: veto published to bus", len(vetoes) >= 1)
 tail = audit.tail(50)
 check("audit: records exist with reasoning",
       len(tail) >= 4 and all("reasoning" in r for r in tail))
-check("audit: persisted to disk", os.path.exists("runtime/audit.jsonl"))
+check("audit: persisted to disk", os.path.exists("runtime/_test/audit.jsonl"))
 
 # ---- 6. Orchestrator end-to-end on fake data (uptrend -> should trade)
 prov = FakeProvider(mu=0.002, vol=0.008)
@@ -159,7 +167,7 @@ check("lse: quote % change is not the old bar-to-bar delta",
 
 # ---- 11. P1b: AUM + max position size veto (fixed $ and % of AUM modes)
 risk2 = RiskEngine(cfg, bus, state, audit)
-broker2 = PaperBroker(cfg, bus, state, audit, path="runtime/broker_test2.json")
+broker2 = PaperBroker(cfg, bus, state, audit, path="runtime/_test/broker_test2.json")
 
 risk2.cfg = dataclasses.replace(cfg, max_position_mode="fixed",
                                 max_position_fixed_usd=500.0)
@@ -515,7 +523,7 @@ check("validation: bootstrap_mean_return does not exclude zero for a noisy sampl
       not bootstrap_mean_return(_noisy_edge)["excludes_zero"])
 
 # ---- 31. P7a: StrategyRegistry — log/settle/promote lifecycle
-reg1 = StrategyRegistry(audit, path="runtime/test_registry_p7a.json")
+reg1 = StrategyRegistry(audit, path="runtime/_test/registry_p7a.json")
 check("strategy_registry: starts every strategy in INCUBATION",
       reg1.status("s1") == StrategyRegistry.STATUS_INCUBATION)
 for _ in range(MIN_SIGNALS_TO_PROMOTE + 5):
@@ -539,7 +547,7 @@ check("strategy_registry: holds in INCUBATION with too few settled signals",
       and reg1.status("s2") == StrategyRegistry.STATUS_INCUBATION)
 
 # ---- 32. P7a: RuleOrchestrator.step() enforces the gate; exits are never gated
-reg7 = StrategyRegistry(audit, path="runtime/test_registry_p7a_orch.json")
+reg7 = StrategyRegistry(audit, path="runtime/_test/registry_p7a_orch.json")
 orch7 = RuleOrchestrator(bus, state, audit, risk, broker, FakeProvider(),
                          registry=reg7)
 # isolate this test from P7c's regime gate (FakeProvider's synthetic path
@@ -597,6 +605,75 @@ f3 = orch7.step(["P7APROMO"], risk_pct=1.0)
 check("step(): once PAPER, new BUY entries execute normally",
       len(f3) == 1 and "P7APROMO" in broker.positions)
 
+# owner-reported bug (2026-08-02): "AAPL had a BUY signal but no fill
+# appeared in TRADES" -- a BUY signal on an ALREADY-HELD symbol is
+# correct-but-silent behavior (no pyramiding), so it looked like a bug.
+# Now audited so it isn't a silent mystery.
+broker.positions["P7AHELD"] = {"qty": 3, "avg_price": 100.0}
+f4 = orch7.step(["P7AHELD"], risk_pct=1.0)
+check("step(): a BUY signal on an already-held symbol is audited, not silent",
+      len(f4) == 0
+      and any(r["action"] == "SIGNAL IGNORED (ALREADY HELD)"
+             and r["data"]["held_qty"] == 3
+             for r in audit.tail(20)))
+del broker.positions["P7AHELD"]
+
+orch7.analyze = lambda symbol, **kw: {
+    "symbol": symbol, "signal": "BUY", "price": 100.0, "shares": 0,
+    "why": "test tiny size", "urgency": "🟢 ACTIONABLE", "mode": "ENTRY",
+    "gates": "5/5"}
+f5 = orch7.step(["P7AZEROSIZE"], risk_pct=1.0)
+check("step(): a BUY sized to 0 shares after multipliers is audited, not silent",
+      len(f5) == 0
+      and any(r["action"] == "SIGNAL LOGGED (SIZE ROUNDED TO 0)"
+             for r in audit.tail(20)))
+
+# ---- 32b. P9: universe-scale decision cycle -- DECISION CYCLE audit +
+# regime refit budget/cache (quant.hmm_regime's real fit is ~11s/symbol,
+# so step() must never fit fresh regimes for the whole universe every
+# cycle -- see RuleOrchestrator.REGIME_REFIT_BUDGET_PER_CYCLE)
+import ai.orchestrator as _orch_mod
+_regime_fits = {"n": 0}
+def _fake_classify_regime(returns):
+    _regime_fits["n"] += 1
+    return {"regime": "Bull", "policy": REGIME_POLICY["Bull"]}
+_real_classify_regime = _orch_mod.classify_regime
+_orch_mod.classify_regime = _fake_classify_regime
+
+reg9u = StrategyRegistry(audit, path="runtime/_test/registry_universe.json")
+orch16 = RuleOrchestrator(bus, state, audit, risk, broker, FakeProvider(),
+                          registry=reg9u)
+orch16.correlation_monitor = lambda: {"policy": CORRELATION_POLICY["normal"]}
+orch16.analyze = lambda symbol, **kw: {
+    "symbol": symbol, "signal": "NONE", "price": 100.0, "shares": 0,
+    "why": "test scan", "urgency": "—", "mode": "ENTRY", "gates": "0/5"}
+
+_big_universe = [f"UNIVBIG{i}" for i in range(30)]
+orch16.step(_big_universe, risk_pct=1.0, bypass_incubation=True)
+check("step(): DECISION CYCLE audit + state.decision_cycle.last_scan "
+      "record the full symbol count",
+      state.get("decision_cycle.last_scan")["n_symbols"] == 30
+      and any(r["action"] == "DECISION CYCLE"
+             and r["reasoning"] == "Decision cycle: scanning 30 symbols"
+             for r in audit.tail(60)))
+check("step(): regime refits are capped at REGIME_REFIT_BUDGET_PER_CYCLE "
+      "even when the symbol count exceeds it",
+      _regime_fits["n"] == RuleOrchestrator.REGIME_REFIT_BUDGET_PER_CYCLE)
+
+_regime_fits["n"] = 0
+_small_universe = [f"UNIVSMALL{i}" for i in range(10)]
+orch16.step(_small_universe, risk_pct=1.0, bypass_incubation=True)
+check("step(): first pass over a small (under-budget) symbol set fits "
+      "every symbol's regime",
+      _regime_fits["n"] == 10)
+_regime_fits["n"] = 0
+orch16.step(_small_universe, risk_pct=1.0, bypass_incubation=True)
+check("step(): a second cycle within the TTL reuses every cached regime "
+      "-- zero new HMM refits",
+      _regime_fits["n"] == 0)
+
+_orch_mod.classify_regime = _real_classify_regime
+
 # ---- 33. P7e: DrawdownCircuitBreaker — multiplier curve + peak/halt lifecycle
 check("circuit_breaker: gradual multiplier (1.0 -> 0.5 -> 0.0 across 0-10% DD)",
       DrawdownCircuitBreaker._multiplier(0) == 1.0
@@ -604,7 +681,7 @@ check("circuit_breaker: gradual multiplier (1.0 -> 0.5 -> 0.0 across 0-10% DD)",
       and DrawdownCircuitBreaker._multiplier(10) == 0.0
       and DrawdownCircuitBreaker._multiplier(2.5) == 0.75)
 
-cb1 = DrawdownCircuitBreaker(audit, path="runtime/test_cb1.json")
+cb1 = DrawdownCircuitBreaker(audit, path="runtime/_test/cb1.json")
 s1 = cb1.update(10000)                 # first mark sets the peak
 check("circuit_breaker: first update establishes the peak with no drawdown",
       s1["peak_equity"] == 10000 and s1["drawdown_pct"] == 0.0
@@ -633,9 +710,9 @@ check("circuit_breaker: a reasoned manual_reset clears the halt and is audited",
       and any(r["action"] == "CIRCUIT BREAKER RESET" for r in audit.tail(20)))
 
 # ---- 34. P7e: RiskEngine defense-in-depth veto when the breaker is tripped
-cb2 = DrawdownCircuitBreaker(audit, path="runtime/test_cb2.json")
+cb2 = DrawdownCircuitBreaker(audit, path="runtime/_test/cb2.json")
 cb2._data["peak_equity"] = 20000.0     # fabricate a high peak -> instant big drawdown
-broker3 = PaperBroker(cfg, bus, state, audit, path="runtime/test_broker_cb.json")
+broker3 = PaperBroker(cfg, bus, state, audit, path="runtime/_test/broker_cb.json")
 risk3 = RiskEngine(cfg, bus, state, audit, circuit_breaker=cb2)
 halted_buy = risk3.review(Order("HALT", "BUY", 1, reason="test"), broker3, 100.0)
 check("risk: vetoes a BUY when the circuit breaker is HALTED",
@@ -647,9 +724,9 @@ check("risk: circuit breaker checks never apply to SELL (exits stay unblocked)",
 # ---- 35. P7e: RuleOrchestrator.step() applies the size multiplier to real orders
 # step() derives equity from the broker's OWN balance each call, so the
 # drawdown must be simulated there, not via a disconnected update() call.
-cb3 = DrawdownCircuitBreaker(audit, path="runtime/test_cb3.json")
+cb3 = DrawdownCircuitBreaker(audit, path="runtime/_test/cb3.json")
 cb3.update(10000)                      # establish the peak
-broker4 = PaperBroker(cfg, bus, state, audit, path="runtime/test_broker_cb2.json")
+broker4 = PaperBroker(cfg, bus, state, audit, path="runtime/_test/broker_cb2.json")
 broker4.cash = 9500.0                  # simulate a 5% drawdown in the broker's own equity
 broker4.day_start_equity = 9500.0      # keep the (unrelated) daily-loss check from also firing
 risk4 = RiskEngine(cfg, bus, state, audit, circuit_breaker=cb3)
@@ -731,7 +808,7 @@ check("regime_gate: Bear policy is dip-only at half size",
       and REGIME_POLICY["Bear"]["size_multiplier"] == 0.5)
 
 # ---- 40. P7c: StrategyRegistry tracks settled-signal performance per regime
-reg2 = StrategyRegistry(audit, path="runtime/test_registry_p7c.json")
+reg2 = StrategyRegistry(audit, path="runtime/_test/registry_p7c.json")
 reg2.log_signal("s3", "AAA", "BUY", 100.0, horizon_days=10, regime="Bull")
 reg2.log_signal("s3", "BBB", "BUY", 100.0, horizon_days=10, regime="Bear")
 for sgl in reg2._data["s3"]["signals"]:
@@ -776,7 +853,7 @@ check("step(): BEAR regime allows a dip-setup BUY, sized to half",
       and broker.positions["P7CBEARDIP"]["qty"] == 5)
 
 # ---- 42. P7d: PaperBroker fills record decision_price + signed slippage_pct
-broker5 = PaperBroker(cfg, bus, state, audit, path="runtime/test_broker_p7d.json")
+broker5 = PaperBroker(cfg, bus, state, audit, path="runtime/_test/broker_p7d.json")
 buy_order = Order("P7D", "BUY", 10, reason="test"); buy_order.approved = True
 f_buy = broker5.execute(buy_order, 100.0)
 check("broker: BUY fill records decision_price and a positive (cost) slippage_pct",
@@ -829,7 +906,7 @@ check("correlation_monitor: independent series stay in the normal state",
 # ---- 46. P7f: RuleOrchestrator.correlation_monitor() wiring
 # a FRESH broker (0 positions) -- the shared `broker` has accumulated many
 # positions from earlier tests in this file by now.
-broker6 = PaperBroker(cfg, bus, state, audit, path="runtime/test_broker_p7f.json")
+broker6 = PaperBroker(cfg, bus, state, audit, path="runtime/_test/broker_p7f.json")
 orch12 = RuleOrchestrator(bus, state, audit, risk, broker6, FakeProvider())
 check("correlation_monitor(): fewer than 2 positions -> normal policy, no error",
       orch12.correlation_monitor()["policy"] == CORRELATION_POLICY["normal"])
@@ -880,7 +957,7 @@ check("portfolio_stress: risk_budget_from_stress stays normal otherwise",
       not risk_budget_from_stress(_stress_div)["elevated_risk"])
 
 # ---- 49. P7g: RuleOrchestrator.stress_test() wiring + step() risk-budget feed
-broker7 = PaperBroker(cfg, bus, state, audit, path="runtime/test_broker_p7g.json")
+broker7 = PaperBroker(cfg, bus, state, audit, path="runtime/_test/broker_p7g.json")
 orch13 = RuleOrchestrator(bus, state, audit, risk, broker7, FakeProvider())
 check("stress_test(): honest error with no open positions",
       "error" in orch13.stress_test())
@@ -938,11 +1015,11 @@ check("daily_report: real fills/signals/suggestions render into the tables",
       and "66.7" in _filled_report)
 
 # ---- 51. P7h: RuleOrchestrator.daily_report() wiring — file, state, audit
-broker8 = PaperBroker(cfg, bus, state, audit, path="runtime/test_broker_p7h.json")
-reg8 = StrategyRegistry(audit, path="runtime/test_registry_p7h.json")
+broker8 = PaperBroker(cfg, bus, state, audit, path="runtime/_test/broker_p7h.json")
+reg8 = StrategyRegistry(audit, path="runtime/_test/registry_p7h.json")
 orch14 = RuleOrchestrator(bus, state, audit, risk, broker8, FakeProvider(),
                           registry=reg8)
-rep = orch14.daily_report(watchlist=None, reports_dir="runtime/test_reports")
+rep = orch14.daily_report(watchlist=None, reports_dir="runtime/_test/reports")
 check("daily_report(): writes a real markdown file to the reports dir",
       os.path.exists(rep["path"]) and rep["path"].endswith(".md"))
 check("daily_report(): writes state.daily_report + a DAILY REPORT audit record",
@@ -1090,9 +1167,9 @@ check("lse: options_chain caps the vault to one fetch per 10min per underlying",
       _chain_calls["n"] == 1 and len(_c1) == 1 and len(_c2) == 1)
 
 # ---- 59. P8: RuleOrchestrator.morning_briefing() wiring
-broker9 = PaperBroker(cfg, bus, state, audit, path="runtime/test_broker_p8m.json")
+broker9 = PaperBroker(cfg, bus, state, audit, path="runtime/_test/broker_p8m.json")
 orch15 = RuleOrchestrator(bus, state, audit, risk, broker9, FakeProvider())
-mb = orch15.morning_briefing(watchlist=None, reports_dir="runtime/test_reports")
+mb = orch15.morning_briefing(watchlist=None, reports_dir="runtime/_test/reports")
 check("morning_briefing(): writes a real markdown file to the reports dir",
       os.path.exists(mb["path"]) and mb["path"].endswith("_morning.md"))
 check("morning_briefing(): writes state.morning_briefing + an audit record",

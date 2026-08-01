@@ -101,6 +101,20 @@ class RuleOrchestrator:
 
     STRATEGY_NAME = "rule_v1_playbook_verdict"
 
+    # P9 universe-scale decision cycle: _regime_gate's HMM refit measured
+    # ~11s/symbol (quant.hmm_regime's hand-rolled Baum-Welch EM, no
+    # torch/GPU per Iron Rule #8) -- fitting all ~550 universe symbols
+    # fresh every 5-minute cycle is a ~100-minute job, not a 5-minute one.
+    # step() caches each symbol's regime read for REGIME_REFIT_TTL_S and
+    # caps fresh refits to REGIME_REFIT_BUDGET_PER_CYCLE per cycle; symbols
+    # without ANY cached read yet default to unrestricted Bull (the same
+    # honest fallback _regime_gate already uses for <90 bars of history)
+    # rather than blocking, so a cold-started universe trades immediately
+    # and gets progressively more accurate regime protection as the cache
+    # warms up over the next couple of hours.
+    REGIME_REFIT_TTL_S = 1800
+    REGIME_REFIT_BUDGET_PER_CYCLE = 20
+
     def __init__(self, bus: EventBus, state: GlobalState, audit: AuditLog,
                  risk: RiskEngine, broker: PaperBroker,
                  provider: DataProvider, news: NewsProvider | None = None,
@@ -160,6 +174,20 @@ class RuleOrchestrator:
                                     source="risk"))
         return rc
 
+    def _cached_regime_gate(self, symbol: str) -> dict | None:
+        """step()'s universe-scale refit budget: returns the cached
+        state.regime.{symbol} read if it's still within
+        REGIME_REFIT_TTL_S of _regime_gate()'s last real fit for this
+        symbol, else None (caller decides whether this cycle's refit
+        budget allows a fresh classification). _regime_gate() itself is
+        untouched -- this only reads what it already persists to state,
+        so nothing here changes its own tested behavior."""
+        cached = self._state.get(f"regime.{symbol}")
+        if cached is not None and not _cooldown_ok(
+                self._state, f"regime_fit.{symbol}", self.REGIME_REFIT_TTL_S):
+            return cached
+        return None
+
     # ---- indicators (self-contained; QuantSignal engines port in later) --
     @staticmethod
     def _rsi(close: pd.Series, n: int = 2) -> float:
@@ -179,14 +207,20 @@ class RuleOrchestrator:
 
     def analyze(self, symbol: str, equity: float = 10000.0,
                 risk_pct: float = 1.0, held: dict | None = None,
-                regime: str | None = None) -> dict:
+                regime: str | None = None,
+                candles: pd.DataFrame | None = None) -> dict:
         """QuantSignal fusion: the 5-gate Playbook + 7-model verdict drive
         the signal; the reasoning IS the playbook instruction.
 
         regime: P7c Bull/Bear/Storm from quant.regime_gate. In Storm, an
         existing position's fallback stop tightens from 6% to 3% below
-        entry — "tighten all stops" per the regime policy."""
-        df = self._provider.get_candles(symbol)
+        entry — "tighten all stops" per the regime policy.
+
+        candles: pre-fetched bars (step()'s universe-wide batched fetch,
+        one yf.download() for every symbol instead of N round-trips) --
+        falls back to a live per-symbol fetch when not supplied, so every
+        other caller (research(), tests, direct use) is unaffected."""
+        df = candles if candles is not None else self._provider.get_candles(symbol)
         if len(df) < 220:
             return {"symbol": symbol, "signal": "NONE",
                     "why": "insufficient history"}
@@ -857,6 +891,18 @@ class RuleOrchestrator:
         history toward promotion even while bypassed; this only skips the
         may_enter check below, never any of the other gates (regime,
         circuit breaker, correlation, cost)."""
+        # a state key (not just the audit record below) so the AUDIT tab
+        # can show this durably -- at universe scale a single cycle can
+        # produce dozens of other audit records (SIGNAL LOGGED/PROPOSE
+        # BUY/etc per symbol) that would otherwise bury this in tail(N)
+        # before anyone sees it.
+        self._state.set("decision_cycle.last_scan",
+                        {"n_symbols": len(symbols), "ts": time.time()},
+                        source="orchestrator")
+        self._audit.record(
+            "Orchestrator", "DECISION CYCLE", model="rule-v1",
+            reasoning=f"Decision cycle: scanning {len(symbols)} symbols",
+            data={"n_symbols": len(symbols)})
         fills = []
         prices_seen = {}
         may_enter = True
@@ -883,13 +929,34 @@ class RuleOrchestrator:
         stress_budget = (self._state.get("portfolio_stress.risk_budget")
                         or {"size_multiplier": 1.0, "elevated_risk": False})
 
+        # universe-scale batched candle fetch (see analyze()'s `candles`
+        # param) -- one provider round-trip for every symbol instead of N.
+        # FakeProvider (tests) has no get_candles_batch, so this is {} and
+        # every symbol falls back to analyze()'s own per-symbol fetch,
+        # unchanged from before this method existed.
+        batch_fn = getattr(self._provider, "get_candles_batch", None)
+        candles_by_symbol = batch_fn(symbols) if batch_fn else {}
+
+        regime_refits_used = 0
         for s in symbols:
             held_pos = self._broker.positions.get(s)
             eq0 = self._broker.equity(prices_seen)
-            rc = self._regime_gate(s)
+            rc = self._cached_regime_gate(s)
+            if rc is None:
+                if regime_refits_used < self.REGIME_REFIT_BUDGET_PER_CYCLE:
+                    rc = self._regime_gate(s)
+                    _mark_ran(self._state, f"regime_fit.{s}")
+                    regime_refits_used += 1
+                else:
+                    # this cycle's refit budget is spent -- an unclassified
+                    # symbol trades unrestricted rather than being blocked
+                    # on a technicality (same honest fallback _regime_gate
+                    # itself uses for <90 bars of history).
+                    rc = {"regime": "Bull", "policy": REGIME_POLICY["Bull"]}
             pol = rc["policy"]
             sig = self.analyze(s, equity=eq0, risk_pct=risk_pct,
-                               held=held_pos, regime=rc["regime"])
+                               held=held_pos, regime=rc["regime"],
+                               candles=candles_by_symbol.get(s))
             price = sig.get("price", 0)
             if price:
                 prices_seen[s] = price
@@ -962,6 +1029,15 @@ class RuleOrchestrator:
                 if cb and cb["size_multiplier"] < 1.0:
                     qty = int(qty * cb["size_multiplier"])
                 if qty < 1:
+                    self._audit.record(
+                        "Orchestrator", "SIGNAL LOGGED (SIZE ROUNDED TO 0)",
+                        trigger=f"signals.{s}", model="rule-v1",
+                        reasoning=(f"{s}: BUY signal logged but NOT traded "
+                                  f"— position size rounded down to 0 "
+                                  f"shares after regime/correlation/stress/"
+                                  f"circuit-breaker size multipliers"),
+                        data={"symbol": s, "signal": "BUY", "price": price,
+                             "raw_shares": sig.get("shares")})
                     continue
                 order = Order(s, "BUY", qty, reason=sig["why"])
                 ce = self._cost_and_edge(s, qty, price, eq0, risk_pct, "BUY")
@@ -1007,6 +1083,17 @@ class RuleOrchestrator:
                     f = self._broker.execute(order, price)
                     if f:
                         fills.append(f)
+            elif sig["signal"] == "BUY" and held:
+                # not a new entry -- no pyramiding into an existing
+                # position. Audited so a BUY in the Signals table with no
+                # matching fill in TRADES isn't a silent mystery.
+                self._audit.record(
+                    "Orchestrator", "SIGNAL IGNORED (ALREADY HELD)",
+                    trigger=f"signals.{s}", model="rule-v1",
+                    reasoning=(f"{s}: BUY signal but {held} shares already "
+                              f"held — no new entry placed (not pyramiding)"),
+                    data={"symbol": s, "signal": "BUY", "price": price,
+                         "held_qty": held})
         self.correlation_watch(prices_seen)
         return fills
 
