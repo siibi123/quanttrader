@@ -485,6 +485,7 @@ class RuleOrchestrator:
         return out
 
     def daily_report(self, watchlist: list[str] | None = None,
+                     scan_universe: list[str] | None = None,
                      reports_dir: str = "reports") -> dict:
         """P7h: assemble + render the daily institutional report ->
         reports/YYYY-MM-DD.md, state.daily_report, audit.
@@ -564,8 +565,9 @@ class RuleOrchestrator:
                          "section is unavailable.")
 
         suggestions = []
-        if watchlist:
-            scan = self.sector_scan(watchlist, account=equity)
+        scan_symbols = scan_universe or watchlist
+        if scan_symbols:
+            scan = self.sector_scan(scan_symbols, account=equity)
             suggestions = scan.get("names", [])
         else:
             notes.append("No watchlist passed — tomorrow's candidate "
@@ -601,6 +603,7 @@ class RuleOrchestrator:
         return out
 
     def morning_briefing(self, watchlist: list[str] | None = None,
+                         scan_universe: list[str] | None = None,
                          reports_dir: str = "reports") -> dict:
         """P8: pre-open snapshot -> reports/YYYY-MM-DD_morning.md — risk
         status (drawdown circuit breaker, correlation regime), a per-
@@ -621,9 +624,11 @@ class RuleOrchestrator:
         if watchlist:
             for s in watchlist:
                 regimes[s] = self._regime_gate(s)["regime"]
-            scan = self.sector_scan(watchlist, account=equity)
+        scan_symbols = scan_universe or watchlist
+        if scan_symbols:
+            scan = self.sector_scan(scan_symbols, account=equity)
             candidates = scan.get("names", [])
-        else:
+        if not watchlist and not scan_symbols:
             notes.append("No watchlist passed — regime reads and "
                         "candidate scan skipped this run.")
 
@@ -718,9 +723,13 @@ class RuleOrchestrator:
         is set, else 'Unclassified' — never guessed.
 
         Rate-limited to once per 5 minutes (RATE LIMIT PROTECTION, P8):
-        this IS the "universe scan" — one fetch per watchlist symbol. A
-        repeat call inside the cooldown window returns the last cached
-        state.sector_scan instead of re-fetching."""
+        this IS the "universe scan" — one batched candles fetch across
+        every symbol passed in (P9: normally the full ~550-name S&P500+
+        Nasdaq100 universe, not just the small decision-cycle watchlist —
+        this function itself never places an order, so scanning wider
+        doesn't touch the P9 decision-cycle/universe split). A repeat call
+        inside the cooldown window returns the last cached state.sector_scan
+        instead of re-fetching."""
         if not _cooldown_ok(self._state, "sector_scan", 300):
             cached = self._state.get("sector_scan")
             return {**cached, "throttled": True} if cached else {}
@@ -730,17 +739,28 @@ class RuleOrchestrator:
         data = (batch_fn(symbols) if batch_fn else
                {s: self._provider.get_candles(s) for s in symbols})
         data = {s: df for s, df in data.items() if len(df) >= 220}
+        n_requested = len(symbols)
         if not data:
             return {}
 
         sectors = {}
         if self._lse and self._lse.key:
-            for s in data:
-                prof = self._lse.company_profiles(symbol=s)
-                if len(prof):
-                    prof.columns = [str(c).lower() for c in prof.columns]
-                    if "sector" in prof.columns:
-                        sectors[s] = str(prof["sector"].iloc[0])
+            # One un-filtered profiles pull instead of one call per symbol
+            # -- the LSE endpoint already returns the whole reference
+            # table (up to `limit`), so N single-symbol round-trips would
+            # just be N-1 wasted calls once the universe is hundreds of
+            # names instead of a handful.
+            prof = self._lse.company_profiles(limit=5000)
+            if len(prof):
+                prof.columns = [str(c).lower() for c in prof.columns]
+                sym_col = next((c for c in ("symbol", "ticker")
+                               if c in prof.columns), None)
+                if sym_col and "sector" in prof.columns:
+                    prof[sym_col] = prof[sym_col].astype(str).str.upper()
+                    by_symbol = prof.drop_duplicates(sym_col).set_index(sym_col)
+                    for s in data:
+                        if s in by_symbol.index:
+                            sectors[s] = str(by_symbol.loc[s, "sector"])
 
         sentiment_by, flow_by, confluence_by = {}, {}, {}
         for s in data:
@@ -763,6 +783,7 @@ class RuleOrchestrator:
                                      flow_by_ticker=flow_by,
                                      macro_trend=macro_trend,
                                      flow_confluence_by_ticker=confluence_by)
+        out["n_requested"] = n_requested
         self._state.set("sector_scan", out, source="research")
         top_sec = out["sectors"][0]["sector"] if out["sectors"] else "none"
         top_names = ", ".join(f"{n['ticker']} ({n['target_score']})"
@@ -770,9 +791,10 @@ class RuleOrchestrator:
         self._audit.record(
             "Research", "SECTOR SCAN",
             model="quant.sector_engine (verdict + sentiment/flow/macro tilts)",
-            reasoning=(f"Scanned {out['n_scanned']} names · top sector "
-                      f"{top_sec} · top names: {top_names or 'none tradeable'}"
-                      f" · {len(out['avoid'])} flagged to avoid"),
+            reasoning=(f"Scanned {out['n_scanned']}/{n_requested} names · "
+                      f"top sector {top_sec} · top names: "
+                      f"{top_names or 'none tradeable'} · "
+                      f"{len(out['avoid'])} flagged to avoid"),
             data=out)
         return out
 
@@ -823,16 +845,29 @@ class RuleOrchestrator:
                 data=surf)
         return out
 
-    def step(self, symbols: list[str], risk_pct: float = 1.0) -> list[dict]:
-        """One decision cycle over the watchlist. Returns executed fills."""
+    def step(self, symbols: list[str], risk_pct: float = 1.0,
+             bypass_incubation: bool = False) -> list[dict]:
+        """One decision cycle over the watchlist. Returns executed fills.
+
+        bypass_incubation: owner-controlled escape hatch (sidebar toggle,
+        app.py) for a strategy with zero trading history — the P7a gate is
+        correct long-term but blocks every entry forever if never bypassed
+        starting from zero signals. Signals are still logged and settled
+        normally either way, so the registry keeps accumulating real
+        history toward promotion even while bypassed; this only skips the
+        may_enter check below, never any of the other gates (regime,
+        circuit breaker, correlation, cost)."""
         fills = []
         prices_seen = {}
         may_enter = True
+        incubation_bypassed = False
         if self._registry:
             self._registry.settle_signals(self.STRATEGY_NAME, self._settle_price)
             self._registry.evaluate_promotion(self.STRATEGY_NAME)
-            may_enter = self._registry.status(self.STRATEGY_NAME) \
-                == StrategyRegistry.STATUS_PAPER
+            still_incubating = self._registry.status(self.STRATEGY_NAME) \
+                != StrategyRegistry.STATUS_PAPER
+            incubation_bypassed = bypass_incubation and still_incubating
+            may_enter = bypass_incubation or not still_incubating
 
         cb = None
         if self._circuit_breaker:
@@ -936,10 +971,14 @@ class RuleOrchestrator:
                     cost_note = (f" · expected cost {c['expected_cost_pct']}% "
                                 f"(${c['expected_cost_$']:,.2f}) vs expected "
                                 f"edge {ce.get('edge_pct', '—')}%")
+                bypass_note = (" · ⚠️ P7a INCUBATION gate BYPASSED (testing "
+                               "mode)" if incubation_bypassed else "")
                 self._audit.record("Orchestrator", "PROPOSE BUY",
                                    trigger=f"signals.{s}", model="rule-v1",
-                                   reasoning=sig["why"] + cost_note,
-                                   data={"qty": qty, "price": price, **ce})
+                                   reasoning=sig["why"] + cost_note + bypass_note,
+                                   data={"qty": qty, "price": price,
+                                        "incubation_bypassed": incubation_bypassed,
+                                        **ce})
                 order = self._risk.review(order, self._broker, price,
                                           cost_info={
                                               "expected_cost_pct":

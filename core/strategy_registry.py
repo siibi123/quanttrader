@@ -27,7 +27,7 @@ import pandas as pd
 from core.engine import AuditLog
 from quant.validation import bootstrap_mean_return, deflated_sharpe, haircut_pvalue, permutation_test
 
-MIN_SIGNALS_TO_PROMOTE = 30
+MIN_SIGNALS_TO_PROMOTE = 20
 FORWARD_HORIZON_DAYS = 10
 
 

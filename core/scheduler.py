@@ -33,10 +33,18 @@ class TradingScheduler:
     the app wires them to read GlobalState.get("ui.watchlist"/"ui.risk_pct"),
     which the sidebar keeps current every rerun."""
 
-    def __init__(self, orch, symbols_fn, risk_pct_fn=lambda: 1.0):
+    def __init__(self, orch, symbols_fn, risk_pct_fn=lambda: 1.0,
+                bypass_incubation_fn=lambda: False, universe_fn=None):
         self._orch = orch
         self._symbols_fn = symbols_fn
         self._risk_pct_fn = risk_pct_fn
+        self._bypass_incubation_fn = bypass_incubation_fn
+        # universe_fn (P9 fix): the full S&P500+Nasdaq100 scan universe,
+        # used ONLY for sector_scan's candidate ranking inside the daily
+        # report / morning briefing -- NOT for the decision cycle, which
+        # keeps trading symbols_fn()'s small watchlist (see app.py's
+        # TRADING_WATCHLIST comment for why that split is deliberate).
+        self._universe_fn = universe_fn or symbols_fn
         self.scheduler = BackgroundScheduler(timezone=ET)
         self._started = False
 
@@ -52,13 +60,16 @@ class TradingScheduler:
             return
         symbols = self._symbols_fn()
         if symbols:
-            self._orch.step(symbols, risk_pct=self._risk_pct_fn())
+            self._orch.step(symbols, risk_pct=self._risk_pct_fn(),
+                            bypass_incubation=self._bypass_incubation_fn())
 
     def _run_daily_report(self):
-        self._orch.daily_report(watchlist=self._symbols_fn())
+        self._orch.daily_report(watchlist=self._symbols_fn(),
+                                scan_universe=self._universe_fn())
 
     def _run_morning_briefing(self):
-        self._orch.morning_briefing(watchlist=self._symbols_fn())
+        self._orch.morning_briefing(watchlist=self._symbols_fn(),
+                                    scan_universe=self._universe_fn())
 
     def start(self):
         if self._started:

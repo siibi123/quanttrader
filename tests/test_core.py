@@ -397,6 +397,12 @@ _scan5 = orch5.sector_scan(["P5A", "P5B"], account=10000, risk_pct=1.0)
 check("sector_scan: writes state.sector_scan and a SECTOR SCAN audit record",
       state.get("sector_scan") is not None
       and any(r["action"] == "SECTOR SCAN" for r in audit.tail(20)))
+check("sector_scan: reports n_requested (full scan size) alongside "
+      "n_scanned, and the SECTOR SCAN audit shows both",
+      _scan5["n_requested"] == 2
+      and any(r["action"] == "SECTOR SCAN"
+             and f"Scanned {_scan5['n_scanned']}/2 names" in r["reasoning"]
+             for r in audit.tail(20)))
 
 # ---- 25. P6a: orderflow — BVC/CVD confirms a healthy uptrend
 _rng6 = np.random.default_rng(9)
@@ -553,6 +559,16 @@ f1 = orch7.step(["P7AENTRY"], risk_pct=1.0)
 check("step(): INCUBATION blocks a new BUY entry but still logs the signal",
       len(f1) == 0 and "P7AENTRY" not in broker.positions
       and any(r["action"] == "SIGNAL LOGGED (INCUBATION)"
+             for r in audit.tail(20)))
+
+# bypass toggle (owner-facing INCUBATION escape hatch, sidebar-controlled
+# default ON): the same INCUBATION strategy, but the caller now asks to
+# skip the P7a hold-back so entries actually place.
+f1b = orch7.step(["P7ABYPASS"], risk_pct=1.0, bypass_incubation=True)
+check("step(): bypass_incubation=True executes a new BUY despite INCUBATION",
+      len(f1b) == 1 and "P7ABYPASS" in broker.positions
+      and any(r["action"] == "PROPOSE BUY"
+             and r.get("data", {}).get("incubation_bypassed") is True
              for r in audit.tail(20)))
 
 broker.positions["P7AEXIT"] = {"qty": 10, "avg_price": 90.0}
@@ -1089,12 +1105,12 @@ import core.scheduler as _sched_mod
 
 _sched_calls = {"n": 0}
 class _FakeOrchForSched:
-    def step(self, symbols, risk_pct=1.0):
+    def step(self, symbols, risk_pct=1.0, bypass_incubation=False):
         _sched_calls["n"] += 1
         return []
-    def daily_report(self, watchlist=None):
+    def daily_report(self, watchlist=None, scan_universe=None):
         pass
-    def morning_briefing(self, watchlist=None):
+    def morning_briefing(self, watchlist=None, scan_universe=None):
         pass
 
 sched = TradingScheduler(_FakeOrchForSched(), symbols_fn=lambda: ["AAPL"])

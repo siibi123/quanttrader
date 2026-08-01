@@ -121,7 +121,16 @@ def get_engine():
     scheduler = TradingScheduler(
         orch,
         symbols_fn=lambda: TRADING_WATCHLIST,
-        risk_pct_fn=lambda: state.get("ui.risk_pct") or 1.0)
+        risk_pct_fn=lambda: state.get("ui.risk_pct") or 1.0,
+        # P7a bypass default ON (see sidebar STRATEGY PROMOTION expander):
+        # with zero signal history the gate would otherwise block every
+        # entry forever, so the system trades from day one until the
+        # owner turns it off.
+        bypass_incubation_fn=lambda: state.get("ui.bypass_incubation", True),
+        # sector_scan's candidate ranking (morning briefing/daily report)
+        # scans the full universe, not just TRADING_WATCHLIST -- see
+        # module comment above; the decision cycle itself is unaffected.
+        universe_fn=lambda: universe)
     scheduler.start()
     state.set("session", {"started": time.strftime(
         "%Y-%m-%d %H:%M UTC", time.gmtime())})
@@ -245,6 +254,19 @@ with st.sidebar:
             st.caption(f"{counts['settled']}/{MIN_SIGNALS_TO_PROMOTE} settled "
                        f"signals needed · new entries held back, signals "
                        f"still logged")
+        bypass_gate = st.toggle(
+            f"P7a gate: INCUBATION (need {MIN_SIGNALS_TO_PROMOTE} signals) "
+            "[BYPASS FOR TESTING]",
+            value=state.get("ui.bypass_incubation", True),
+            help="ON: new-entry signals go straight to risk review and "
+                 "execution even while INCUBATION, so the system trades "
+                 "from day one with zero history. Signals are still logged "
+                 "toward promotion either way. OFF: restores the normal "
+                 "P7a gate — new entries wait for promotion. Never affects "
+                 "exits, which are always allowed regardless of status.")
+        state.set("ui.bypass_incubation", bypass_gate, source="ui")
+        if bypass_gate and s_status != StrategyRegistry.STATUS_PAPER:
+            st.caption("⚠️ Gate bypassed — entries execute despite INCUBATION.")
         st.caption(f"Signals: {counts['total']} total · {counts['settled']} "
                    f"settled · {counts['pending']} pending")
         last_val = registry.last_validation(strat_name)
@@ -484,7 +506,8 @@ if run:
         if macro_pass and cfg.lse_api_key:
             orch.scan_macro()
             orch.scan_flow(chart_sym)
-        new_fills = orch.step(TRADING_WATCHLIST, risk_pct=rp)
+        new_fills = orch.step(TRADING_WATCHLIST, risk_pct=rp,
+                              bypass_incubation=bypass_gate)
     st.toast(f"Forced cycle complete — {len(new_fills)} fill(s) · research + "
              f"news/macro/flow in AUDIT")
 
@@ -549,6 +572,22 @@ with t_chart:
     else:
         st.info(f"No data for {chart_sym} — throttled or bad symbol.")
 
+def _readable_cell(v):
+    """dict/list cells (e.g. research.{symbol}.anomalies, a list of
+    {name, citation, finding} dicts from quant.anomaly_library) render as
+    literal "[object Object]" if handed straight to st.dataframe — Arrow
+    has no display form for an arbitrary nested object. Flatten to a
+    short human-readable string instead."""
+    if isinstance(v, list):
+        if v and isinstance(v[0], dict):
+            key = "name" if "name" in v[0] else next(iter(v[0]), None)
+            return ", ".join(str(item.get(key, item)) for item in v)
+        return ", ".join(str(x) for x in v) if v else "—"
+    if isinstance(v, dict):
+        return ", ".join(f"{k}: {v2}" for k, v2 in v.items()) or "—"
+    return v
+
+
 with t_metrics:
     render_quote_strip()
     for title, key in (("Signals", "signals"), ("Research", "research"),
@@ -556,7 +595,9 @@ with t_metrics:
         d = state.get(key) or {}
         if d:
             st.markdown(f"### {title}")
-            st.dataframe(pd.DataFrame(d.values()),
+            rows = [{k: _readable_cell(v) for k, v in row.items()}
+                   for row in d.values()]
+            st.dataframe(pd.DataFrame(rows),
                          use_container_width=True, hide_index=True)
     macro_d = state.get("macro") or {}
     if macro_d:
@@ -719,14 +760,21 @@ with t_lab:
 
     st.markdown("### 🎯 Sector & Target Scan")
     if st.button("Scan sectors & targets", use_container_width=True):
-        with st.spinner("Scanning watchlist × verdict × tilts…"):
-            scan = orch.sector_scan(TRADING_WATCHLIST,
+        with st.spinner(f"Scanning {len(E['universe'])}-name universe × "
+                        f"verdict × tilts…"):
+            scan = orch.sector_scan(E["universe"],
                                     account=broker.equity(marks),
                                     risk_pct=rp)
         if not scan:
-            st.info("Not enough history on the watchlist symbols yet — "
+            st.info("Not enough history on the universe symbols yet — "
                     "each needs 220+ bars.")
         else:
+            n_req = scan.get("n_requested", "—")
+            if scan.get("throttled"):
+                st.caption(f"⏱ Rate-limited (once per 5 min) — showing the "
+                          f"last scan: {scan['n_scanned']}/{n_req} names.")
+            else:
+                st.caption(f"Scanned {scan['n_scanned']}/{n_req} names.")
             if scan["sectors"]:
                 st.markdown("**Ranked sectors**")
                 st.dataframe(pd.DataFrame(scan["sectors"]),
