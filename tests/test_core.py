@@ -1428,6 +1428,11 @@ _close_up = pd.Series(np.concatenate([np.full(51, 100.0), np.linspace(100, 120, 
 check("ticker_edge: too few BUY samples is a no-op (mult 1.0)",
       _tedge(_comp_e, _close_up)["mult"] == 1.0)
 
+_desk = orch.refresh_desk(universe=["TREND"], chart_symbol="TREND",
+                          account=10000, risk_pct=1.0)
+check("refresh_desk: returns a stamp and writes desk.last_refresh",
+      isinstance(_desk, dict) and state.get("desk.last_refresh") is not None)
+
 print("\n" + "=" * 44)
 passed = sum(1 for _, ok in results if ok)
 print(f"QUANTTRADER CORE: {passed}/{len(results)} PASS")

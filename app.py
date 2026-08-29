@@ -37,54 +37,62 @@ ACCENT = "#22c55e"
 DEFAULT_CHART_SYMBOL = "AAPL"
 st.markdown(f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=IBM+Plex+Mono:wght@400;600&display=swap');
-html, body, .stApp {{ background:#0a0a0a !important; color:#d4d4d8;
-  font-family:'Inter',sans-serif; }}
-#MainMenu, footer {{ visibility:hidden; }}
-.block-container {{ padding-top:0.4rem; max-width:100% !important; }}
-.qt-nav {{ display:flex; align-items:center; gap:26px; padding:10px 6px;
-  border-bottom:1px solid #1c1c1f; }}
-.qt-logo {{ font-weight:800; font-size:1.05rem; color:#fff; }}
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+html, body, .stApp, [data-testid="stAppViewContainer"] {{
+  background:#070809 !important; color:#c9cdd1;
+  font-family:'IBM Plex Sans',sans-serif;
+}}
+header[data-testid="stHeader"] {{ background:transparent; }}
+#MainMenu, footer, [data-testid="stToolbar"], [data-testid="stDecoration"] {{
+  visibility:hidden; height:0;
+}}
+.block-container {{ padding-top:0.55rem; max-width:1440px !important; padding-bottom:2.5rem; }}
+.qt-nav {{ display:flex; align-items:baseline; gap:18px; padding:4px 2px 12px;
+  border-bottom:1px solid rgba(255,255,255,0.06); margin-bottom:4px; }}
+.qt-logo {{ font-weight:700; font-size:1.05rem; color:#f4f1ea; letter-spacing:-0.03em; }}
 .qt-logo span {{ color:{ACCENT}; }}
-.qt-sub {{ font-size:.6rem; letter-spacing:2px; color:#71717a; }}
-.qt-link {{ font-size:.85rem; color:#a1a1aa; }}
-.qt-link.active {{ color:#fff; border-bottom:2px solid {ACCENT};
-  padding-bottom:8px; }}
-.qt-strip {{ display:flex; border:1px solid #1c1c1f; border-left:0;
-  border-right:0; margin:0 -1rem 14px -1rem; background:#0d0d0f; }}
-.qt-stat {{ flex:1; text-align:center; padding:10px 4px;
-  border-right:1px solid #1c1c1f; }}
-.qt-stat .v {{ font-family:'IBM Plex Mono',monospace; font-weight:600;
-  font-size:1.02rem; color:#fff; }}
-.qt-stat .v.g {{ color:{ACCENT}; }} .qt-stat .v.r {{ color:#ef4444; }}
-.qt-stat .k {{ font-size:.58rem; letter-spacing:1.5px; color:#71717a; }}
-section[data-testid="stSidebar"] {{ background:#0d0d0f !important;
-  border-right:1px solid #1c1c1f; }}
-section[data-testid="stSidebar"] .stExpander {{ border:1px solid #1c1c1f;
-  border-radius:6px; background:#0f0f12; margin-bottom:6px; }}
-section[data-testid="stSidebar"] summary {{ font-size:.72rem !important;
-  letter-spacing:1.5px; text-transform:uppercase; color:#e4e4e7 !important; }}
-.stButton>button {{ border-radius:6px; border:1px solid #27272a;
-  background:#141417; color:#d4d4d8; font-weight:600; }}
-.stButton>button[kind="primary"] {{ background:{ACCENT}; color:#052e16;
-  border:0; font-weight:800; letter-spacing:1px; }}
-.qt-panel {{ border:1px solid #1c1c1f; border-radius:8px; background:#0d0d0f;
-  padding:12px 16px; margin-bottom:10px; }}
-div[data-testid="stDataFrame"] {{ font-family:'IBM Plex Mono',monospace;
-  font-size:.82rem; }}
-div[data-testid="stMetric"] {{ background:#0d0d0f; border:1px solid #1c1c1f;
-  border-radius:8px; padding:8px 12px; }}
-.qt-audit {{ border-left:3px solid {ACCENT}; padding:7px 12px; margin:5px 0;
-  background:#0f0f12; border-radius:0 6px 6px 0;
-  font-family:'IBM Plex Mono',monospace; font-size:.78rem; }}
-.qt-audit.veto {{ border-left-color:#ef4444; }}
+.qt-sub {{ font-size:.62rem; letter-spacing:0.22em; color:#6b7178; font-weight:500; }}
+.qt-link {{ font-size:.78rem; color:#8b9198; }}
+.qt-strip {{ display:flex; border:1px solid rgba(255,255,255,0.07);
+  margin:8px 0 16px; background:#0c0e10; border-radius:2px; }}
+.qt-stat {{ flex:1; text-align:left; padding:12px 14px;
+  border-right:1px solid rgba(255,255,255,0.06); }}
+.qt-stat:last-child {{ border-right:0; }}
+.qt-stat .v {{ font-family:'IBM Plex Mono',monospace; font-weight:500;
+  font-size:1.05rem; color:#f4f1ea; letter-spacing:-0.02em; }}
+.qt-stat .v.g {{ color:{ACCENT}; }} .qt-stat .v.r {{ color:#f07167; }}
+.qt-stat .k {{ font-size:.58rem; letter-spacing:0.16em; color:#6b7178;
+  margin-top:4px; font-weight:500; }}
+section[data-testid="stSidebar"] {{ background:#0c0e10 !important;
+  border-right:1px solid rgba(255,255,255,0.06); }}
+section[data-testid="stSidebar"] .stExpander {{
+  border:1px solid rgba(255,255,255,0.07); border-radius:2px;
+  background:#0a0c0e; margin-bottom:8px; }}
+section[data-testid="stSidebar"] summary {{ font-size:.68rem !important;
+  letter-spacing:0.16em; text-transform:uppercase; color:#e8e6df !important; }}
+.stButton>button {{ border-radius:2px; border:1px solid rgba(255,255,255,0.1);
+  background:#12151a; color:#d5d0c7; font-weight:500; }}
+.stButton>button[kind="primary"] {{ background:{ACCENT}; color:#06210f;
+  border:0; font-weight:700; letter-spacing:0.08em; }}
+.qt-panel {{ border:1px solid rgba(255,255,255,0.07); border-radius:2px;
+  background:#0c0e10; padding:14px 16px; margin-bottom:10px; }}
+.qt-kicker {{ font-size:.62rem; letter-spacing:0.18em; color:#6b7178;
+  text-transform:uppercase; margin-bottom:6px; font-weight:600; }}
+div[data-testid="stDataFrame"] {{ font-family:'IBM Plex Mono',monospace; font-size:.8rem; }}
+div[data-testid="stMetric"] {{ background:#0c0e10; border:1px solid rgba(255,255,255,0.07);
+  border-radius:2px; padding:8px 12px; }}
+.qt-audit {{ border-left:2px solid {ACCENT}; padding:8px 12px; margin:5px 0;
+  background:#0c0e10; font-family:'IBM Plex Mono',monospace; font-size:.76rem; }}
+.qt-audit.veto {{ border-left-color:#f07167; }}
 .qt-audit .who {{ color:{ACCENT}; font-weight:600; }}
-.qt-audit.veto .who {{ color:#ef4444; }}
-.qt-audit .t {{ color:#52525b; float:right; }}
-h3 {{ color:#fff !important; font-size:1rem !important; }}
-.stTabs [data-baseweb="tab"] {{ font-size:.8rem; letter-spacing:1.5px;
+.qt-audit.veto .who {{ color:#f07167; }}
+.qt-audit .t {{ color:#5c6370; float:right; }}
+h3 {{ color:#f4f1ea !important; font-size:0.92rem !important;
+  letter-spacing:0.04em; font-weight:600 !important; }}
+.stTabs [data-baseweb="tab"] {{ font-size:.72rem; letter-spacing:0.14em;
   text-transform:uppercase; }}
 .stTabs [aria-selected="true"] {{ color:{ACCENT} !important; }}
+.stSlider label, .stSelectbox label, .stToggle label {{ color:#8b9198 !important; }}
 </style>""", unsafe_allow_html=True)
 
 PLOT = dict(paper_bgcolor="#0a0a0a", plot_bgcolor="#0a0a0a",
@@ -491,6 +499,19 @@ def render_open_book():
                   f" · updated {time.strftime('%H:%M:%S')}")
     else:
         st.caption("Flat.")
+    alts = state.get("desk.alternatives") or []
+    if alts:
+        st.markdown("<div class='qt-kicker'>Desk alternatives — not held</div>",
+                    unsafe_allow_html=True)
+        st.dataframe(pd.DataFrame([{
+            "ticker": n.get("ticker"), "sector": n.get("sector"),
+            "verdict": n.get("verdict"), "score": n.get("target_score"),
+            "entry": n.get("entry"), "stop": n.get("stop"),
+            "rr": n.get("rr"),
+        } for n in alts[:6]]), use_container_width=True, hide_index=True)
+        st.caption("Ranked by the live sector engine. They still have to "
+                   "clear playbook + RiskEngine on the next cycle — this is "
+                   "the bench, not a second broker.")
 
 
 # ---------------------------------------------------------------------------
@@ -500,10 +521,9 @@ nav_l, nav_r = st.columns([4, 1])
 with nav_l:
     st.markdown("""
     <div class="qt-nav">
-     <div><span class="qt-logo">◆ Quant<span style="color:#22c55e">Trader</span></span>
-     <span class="qt-sub"> MARKET INTELLIGENCE</span></div>
-     <span class="qt-link active">Terminal</span><span class="qt-link">Data</span>
-     <span class="qt-link">AI Core</span><span class="qt-link">Docs</span>
+     <div><span class="qt-logo">Quant<span>Trader</span></span>
+     <span class="qt-sub">PAPER DESK</span></div>
+     <span class="qt-link">Live cycle every 5 min · research auto-feeds sizing</span>
     </div>""", unsafe_allow_html=True)
 with nav_r:
     render_header_clock()
@@ -571,7 +591,7 @@ if run:
 # TABS — CHART | METRICS | TRADES | AUDIT
 # ---------------------------------------------------------------------------
 t_chart, t_metrics, t_trades, t_lab, t_audit = st.tabs(
-    ["CHART", "METRICS", "TRADES", "LAB", "AUDIT"])
+    ["CHART", "METRICS", "TRADES", "RESEARCH", "AUDIT"])
 
 with t_chart:
     iv = {"1h": ("1h", "720d"), "1d": ("1d", "2y"),
@@ -766,258 +786,95 @@ with t_trades:
                        "Secrets so trades survive Cloud restarts.")
 
 with t_lab:
-    from quant.sltp_opt import optimize_sltp
-    from quant.var_lab import var_suite
-    from quant.vol_surface import build_surface_grid
-    lc1, lc2 = st.columns(2)
-    with lc1:
-        st.markdown("### 🧮 VaR Lab")
-        vm = st.selectbox("Method", ["historical", "parametric",
-                                     "cornish_fisher", "ewma"])
-        vc, vh = st.columns(2)
-        conf = vc.slider("Confidence %", 90.0, 99.9, 95.0, 0.5)
-        hor = vh.slider("Horizon (days)", 1, 30, 1)
-        look = st.slider("Lookback", 30, 500, 252)
-        if st.button("Calculate VaR", use_container_width=True):
-            d_ = E["provider"].get_candles(chart_sym)
-            r_ = var_suite(d_["Close"], method=vm, conf=conf / 100,
-                           horizon=hor, lookback=look,
-                           value=broker.equity(marks))
-            if "error" in r_:
-                st.warning(r_["error"])
-            else:
-                m1, m2 = st.columns(2)
-                m1.metric(f"VaR {conf:.0f}% / {hor}d",
-                          f"${r_['VaR_$']:,.0f}", f"{r_['VaR_pct']}%")
-                m2.metric("CVaR (expected shortfall)",
-                          f"${r_['CVaR_$']:,.0f}", f"{r_['CVaR_pct']}%")
-                st.caption(f"{vm} · {r_['lookback']} obs · on current "
-                           f"paper equity")
-    with lc2:
-        st.markdown("### 🎯 SL/TP Optimizer")
-        rank = st.selectbox("Rank by", ["sharpe", "pf", "win", "return",
-                                        "min_dd", "expect", "rr"])
-        hold_ = st.slider("Max hold (bars)", 5, 60, 20)
-        if st.button("Optimize stops & targets", use_container_width=True):
-            with st.spinner("Replaying every model signal × 25 combos…"):
-                d_ = E["provider"].get_candles(chart_sym)
-                g_ = optimize_sltp(d_, hold=hold_, rank_by=rank,
-                                   capital=broker.equity(marks))
-            if len(g_):
-                b_ = g_.iloc[0]
-                st.success(f"Best: SL {b_['SL']}×ATR / TP {b_['TP']}×ATR — "
-                           f"{b_['win_pct']}% win · PF {b_['PF']} · "
-                           f"Sharpe {b_['sharpe']} · DD {b_['max_dd_pct']}%")
-                st.dataframe(g_, use_container_width=True, hide_index=True,
-                             height=300)
-            else:
-                st.info("Not enough BUY signals in history to optimize.")
+    st.markdown("<div class=\'qt-kicker\'>Live desk — feeds the cycle automatically</div>",
+                unsafe_allow_html=True)
+    st.caption("No buttons. Stress, sector rank, flow, execution quality and "
+               "alternatives refresh on the 5-minute decision cycle. "
+               "You override sliders; the desk picks the rest.")
+    desk = state.get("desk.last_refresh") or {}
+    if desk.get("ts"):
+        st.caption("Last desk refresh " + time.strftime("%H:%M:%S", time.localtime(desk["ts"]))
+                   + ((" · " + ", ".join(desk.get("ran") or [])) if desk.get("ran") else ""))
 
-    st.markdown("### 🌋 Volatility Surface")
+    r1, r2 = st.columns(2)
+    with r1:
+        st.markdown("### Book risk")
+        stress = state.get("portfolio_stress") or {}
+        bk = state.get("risk.book") or {}
+        if stress and "error" not in stress:
+            m1, m2, m3 = st.columns(3)
+            m1.metric("P(10% DD)", f"{stress.get('p_10pct_drawdown_%', '—')}%")
+            m2.metric("95% VaR", f"${stress.get('var95_$', 0):,.0f}")
+            m3.metric("CVaR", f"${stress.get('cvar95_$', 0):,.0f}")
+            budget = stress.get("risk_budget") or {}
+            if budget.get("elevated_risk"):
+                st.warning("Elevated — new-entry size already cut to 50%.")
+            else:
+                st.caption("Risk budget normal.")
+        elif bk:
+            st.caption(f"Live book VaR {bk.get('var_VaR_%', '—')}% · "
+                       f"avg corr {bk.get('avg_correlation', '—')}")
+        else:
+            st.caption("Need two open names before Monte Carlo stress runs.")
+
+        eqr = state.get("execution_quality") or {}
+        st.markdown("### Execution")
+        if eqr and "error" not in eqr:
+            e1, e2, e3 = st.columns(3)
+            e1.metric("Avg slip", f"{eqr.get('avg_slippage_pct', 0):+.3f}%")
+            e2.metric("Worst", f"{eqr.get('worst_slippage_pct', 0):+.3f}%")
+            e3.metric("Drag", f"${eqr.get('total_cost_drag_$', 0):,.2f}")
+        else:
+            st.caption("Fills will populate slippage vs decision price.")
+
+    with r2:
+        st.markdown("### Alternatives")
+        alts = state.get("desk.alternatives") or []
+        if alts:
+            st.dataframe(pd.DataFrame([{
+                "ticker": n.get("ticker"), "sector": n.get("sector"),
+                "verdict": n.get("verdict"), "score": n.get("target_score"),
+                "rr": n.get("rr"),
+                "why": "; ".join((n.get("reasons_pro") or [])[:2]),
+            } for n in alts]), use_container_width=True, hide_index=True, height=280)
+            st.caption("Not held. Next cycle still has to clear playbook + veto.")
+        else:
+            st.caption("Universe scan will rank names here after the next cycle.")
+
+        st.markdown("### Flow")
+        flow_d = state.get("flow") or {}
+        if flow_d:
+            for sym, fc in list(flow_d.items())[:4]:
+                if not isinstance(fc, dict):
+                    continue
+                badge = {"CONFLUENCE LONG": ACCENT, "CONFLUENCE SHORT": "#f07167",
+                         "CONFLICT": "#e3b341", "QUIET": "#6b7178"}.get(
+                    fc.get("verdict"), "#6b7178")
+                st.markdown(
+                    f"<div class=\'qt-panel\'><b style=\'color:{badge}\'>{sym} "
+                    f"{fc.get('verdict','')}</b> · tape {fc.get('tape_score', 0):+.2f} "
+                    f"· options {fc.get('options_score', 0):+.2f}</div>",
+                    unsafe_allow_html=True)
+        else:
+            st.caption("Tape × options confluence on the open book + chart symbol.")
+
+    surf = (state.get(f"options.{chart_sym}") or {}).get("surface") or {}
+    st.markdown("### Volatility surface")
     if not cfg.lse_api_key:
-        st.caption("Add LSE_API_KEY in Secrets/.env to build the vol surface "
-                   "— no chain data without it.")
-    elif st.button("Build vol surface", use_container_width=True):
-        with st.spinner("Fetching chain + building surface…"):
-            chain_ = E["lse"].options_chain(chart_sym)
-            ing = orch.ingest_chain(chart_sym, chain_)
-            grid = build_surface_grid(chain_)
-        if "error" in grid:
-            st.warning(grid["error"])
-        else:
-            fig2 = go.Figure(go.Surface(
-                x=grid["strikes"], y=grid["dtes"], z=grid["iv_grid"],
-                colorscale="Viridis"))
-            fig2.update_layout(
-                height=480, margin=dict(l=6, r=6, t=24, b=6),
-                scene=dict(xaxis_title="Strike", yaxis_title="DTE",
-                          zaxis_title="IV",
-                          xaxis=dict(gridcolor="#161618"),
-                          yaxis=dict(gridcolor="#161618"),
-                          zaxis=dict(gridcolor="#161618"),
-                          bgcolor="#0a0a0a"),
-                paper_bgcolor="#0a0a0a",
-                font=dict(color="#a1a1aa", family="IBM Plex Mono", size=11))
-            st.plotly_chart(fig2, use_container_width=True)
-            surf = ing.get("surface")
-            if surf and surf.get("findings"):
-                for f_ in surf["findings"]:
-                    st.markdown(f"<div class='qt-panel'>{f_}</div>",
-                               unsafe_allow_html=True)
-            else:
-                st.caption("Grid built, but the interpreter needs more "
-                           "expiries/strikes (or delta/type columns) for "
-                           "skew, term-structure or smile reads.")
+        st.caption("Needs LSE_API_KEY — skipped, not a trading gate.")
+    elif surf.get("findings"):
+        for f_ in surf["findings"]:
+            st.markdown(f"<div class=\'qt-panel\'>{f_}</div>", unsafe_allow_html=True)
+    else:
+        st.caption("Chain interpreter runs with the cycle when the key is set. "
+                   "Empty findings = not enough strikes/expiries, not a crash.")
 
-    st.markdown("### 🎯 Sector & Target Scan")
-    if st.button("Scan sectors & targets", use_container_width=True):
-        with st.spinner(f"Scanning {len(E['universe'])}-name universe × "
-                        f"verdict × tilts…"):
-            scan = orch.sector_scan(E["universe"],
-                                    account=broker.equity(marks),
-                                    risk_pct=rp)
-        if not scan:
-            st.info("Not enough history on the universe symbols yet — "
-                    "each needs 220+ bars.")
-        else:
-            n_req = scan.get("n_requested", "—")
-            if scan.get("throttled"):
-                st.caption(f"⏱ Rate-limited (once per 5 min) — showing the "
-                          f"last scan: {scan['n_scanned']}/{n_req} names.")
-            else:
-                st.caption(f"Scanned {scan['n_scanned']}/{n_req} names.")
-            if scan["sectors"]:
-                st.markdown("**Ranked sectors**")
-                st.dataframe(pd.DataFrame(scan["sectors"]),
-                            use_container_width=True, hide_index=True)
-            if scan["names"]:
-                st.markdown("**Ranked names**")
-                rows = [{"ticker": n["ticker"], "sector": n["sector"],
-                        "verdict": n["verdict"], "target score": n["target_score"],
-                        "entry": n["entry"], "stop": n["stop"],
-                        "target": n["target"], "rr": n["rr"],
-                        "avoid above": n.get("avoid_above"),
-                        "avoid below": n.get("avoid_below"),
-                        "why": "; ".join(n["reasons_pro"][:2] + n["tilt_reasons"])}
-                       for n in scan["names"]]
-                st.dataframe(pd.DataFrame(rows), use_container_width=True,
-                            hide_index=True)
-            else:
-                st.caption("Nothing cleared a tradeable verdict today.")
-            if scan["avoid"]:
-                st.markdown("**Avoid**")
-                st.dataframe(pd.DataFrame(scan["avoid"]),
-                            use_container_width=True, hide_index=True)
-            st.caption("Suggestions only — nothing here executes a trade. "
-                       "Acting on any of these still goes through RUN "
-                       "DECISION CYCLE's propose → RiskEngine veto → "
-                       "PaperBroker → AuditLog chain.")
-
-    st.markdown("### 🌊 Flow Confluence")
-    if st.button("Scan flow confluence", use_container_width=True):
-        from quant.orderflow import cvd as flow_cvd, vpin as flow_vpin
-        with st.spinner("Tape (BVC/CVD/VPIN) × options positioning…"):
-            df_flow = E["provider"].get_candles(chart_sym)
-            fc = orch.scan_flow_confluence(chart_sym)
-        if not fc:
-            st.info(f"Not enough bars for {chart_sym} yet (need 40+).")
-        else:
-            c1f, c2f = st.columns([2, 1])
-            with c1f:
-                cd = flow_cvd(df_flow)
-                if "error" not in cd:
-                    fig3 = go.Figure()
-                    fig3.add_trace(go.Scatter(
-                        x=df_flow.index, y=df_flow["Close"], name="Price",
-                        yaxis="y1", line=dict(color=ACCENT)))
-                    fig3.add_trace(go.Scatter(
-                        x=cd["cvd_series"].index, y=cd["cvd_series"].values,
-                        name="CVD", yaxis="y2", line=dict(color="#f59e0b")))
-                    fig3.update_layout(
-                        height=340, margin=dict(l=6, r=6, t=24, b=6),
-                        paper_bgcolor="#0a0a0a", plot_bgcolor="#0a0a0a",
-                        font=dict(color="#a1a1aa", family="IBM Plex Mono", size=11),
-                        yaxis=dict(title="Price", side="left", gridcolor="#161618"),
-                        yaxis2=dict(title="CVD", side="right", overlaying="y",
-                                   gridcolor="#161618"),
-                        xaxis=dict(gridcolor="#161618"),
-                        legend=dict(orientation="h", y=1.08))
-                    st.plotly_chart(fig3, use_container_width=True)
-                else:
-                    st.caption(cd["error"])
-            with c2f:
-                vp = flow_vpin(df_flow)
-                if "error" not in vp:
-                    fig4 = go.Figure(go.Indicator(
-                        mode="gauge+number", value=vp["percentile"],
-                        title={"text": "VPIN toxicity percentile"},
-                        gauge={"axis": {"range": [0, 100]},
-                              "bar": {"color": "#ef4444" if vp["toxic"] else ACCENT},
-                              "steps": [{"range": [0, 85], "color": "#141417"},
-                                       {"range": [85, 100], "color": "#3f1212"}]}))
-                    fig4.update_layout(
-                        height=220, margin=dict(l=6, r=6, t=30, b=6),
-                        paper_bgcolor="#0a0a0a",
-                        font=dict(color="#a1a1aa", family="IBM Plex Mono", size=11))
-                    st.plotly_chart(fig4, use_container_width=True)
-                st.caption("Options premium imbalance (put ← → call)")
-                st.progress(min(max((fc["options_score"] + 1) / 2, 0.0), 1.0))
-            badge = {"CONFLUENCE LONG": ACCENT, "CONFLUENCE SHORT": "#ef4444",
-                    "CONFLICT": "#f59e0b", "QUIET": "#71717a"}.get(fc["verdict"],
-                                                                  "#71717a")
-            st.markdown(
-                f"<div class='qt-panel'><b style='color:{badge}'>{fc['verdict']}"
-                f"</b> · tape {fc['tape_score']:+.2f} · options "
-                f"{fc['options_score']:+.2f}<br>" +
-                " · ".join(fc["tape_reasons"] + fc["options_reasons"]) +
-                "</div>", unsafe_allow_html=True)
-
-    st.markdown("### 📊 Execution Quality (P7d)")
-    eq_days = st.slider("Lookback (days)", 1, 30, 7, key="eq_lookback")
-    if st.button("Generate execution report", use_container_width=True):
-        eqr = orch.execution_quality_report(lookback_days=eq_days)
-        if "error" in eqr:
-            st.info(eqr["error"])
-        else:
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Avg slippage", f"{eqr['avg_slippage_pct']:+.3f}%")
-            m2.metric("Worst fill", f"{eqr['worst_slippage_pct']:+.3f}%")
-            m3.metric("Total cost drag", f"${eqr['total_cost_drag_$']:,.2f}")
-            st.caption(f"{eqr['n_fills']} fill(s) over the last "
-                       f"{eqr['lookback_days']} day(s)")
-            if eqr["worst_fills"]:
-                wf = pd.DataFrame(eqr["worst_fills"])
-                wf["time"] = pd.to_datetime(wf["ts"], unit="s").dt.strftime(
-                    "%m-%d %H:%M")
-                st.dataframe(wf[["time", "ticker", "side", "qty",
-                                "decision_price", "price", "slippage_pct"]],
-                            use_container_width=True, hide_index=True)
-            st.caption("PaperBroker currently applies a fixed 0.05% "
-                       "slippage constant, not a market-condition model — "
-                       "this report is real infrastructure over real "
-                       "fills, but every number will cluster near that "
-                       "fixed value until the broker's slippage model "
-                       "itself becomes more realistic.")
-
-    st.markdown("### 🎲 Portfolio Stress Test (P7g)")
-    if st.button("Run Monte Carlo stress test (10,000 paths)",
-                use_container_width=True):
-        with st.spinner("Simulating 10,000 correlated paths of the book…"):
-            stress = orch.stress_test()
-        if "error" in stress:
-            st.info(stress["error"])
-        else:
-            m1, m2, m3 = st.columns(3)
-            m1.metric("P(10% DD next month)", f"{stress['p_10pct_drawdown_%']}%")
-            m2.metric("Expected worst week",
-                      f"{stress.get('expected_worst_week_%', '—')}%")
-            m3.metric("95% VaR", f"${stress['var95_$']:,.0f}")
-            budget = stress["risk_budget"]
-            if budget["elevated_risk"]:
-                st.warning("⚠️ Elevated risk — new-entry size cut to 50% "
-                          "until the next stress test run.")
-            else:
-                st.caption("Risk budget normal — full new-entry sizing.")
-            st.caption(f"{stress['n_paths']:,} paths · {stress['horizon_days']}d "
-                       f"horizon · starting value ${stress['starting_value_$']:,.0f} "
-                       f"· 95% CVaR ${stress['cvar95_$']:,.0f}")
-            st.caption("Feeds into every decision cycle (auto or forced) "
-                       "automatically: this result is cached and applied "
-                       "to every new entry's sizing until the next time "
-                       "this test runs.")
-
-    st.markdown("### 📋 Daily Institutional Report (P7h)")
-    if st.button("Generate today's report", use_container_width=True):
-        with st.spinner("Assembling P&L, risk, signal quality, candidates…"):
-            rep = orch.daily_report(
-                watchlist=sorted(set(broker.positions) | {chart_sym}),
-                scan_universe=E["universe"])
-        st.success(f"Saved to `{rep['path']}`")
-        st.markdown(rep["markdown"])
-        st.download_button("Download markdown", rep["markdown"],
-                           file_name=f"{rep['date']}.md", mime="text/markdown")
-    st.caption("On-demand for now — no scheduler exists yet to genuinely "
-               "auto-run this at market close (see CLAUDE.md roadmap).")
+    brief = state.get("morning_briefing") or {}
+    last_rep = state.get("daily_report") or {}
+    st.markdown("### Briefing")
+    st.caption("Morning 09:25 ET · close report 16:05 ET — scheduler, not a button.")
+    if brief.get("date") or last_rep.get("date"):
+        st.caption(f"Last morning {brief.get('date', '—')} · last close {last_rep.get('date', '—')}")
 
 with t_audit:
     st.markdown("### Audit timeline — trigger → model → reasoning")

@@ -724,15 +724,75 @@ class RuleOrchestrator:
             data={"path": path})
         return out
 
+    def refresh_desk(self, universe: list[str] | None = None,
+                     chart_symbol: str | None = None,
+                     account: float = 10000.0,
+                     risk_pct: float = 1.0) -> dict:
+        """Run the research stack the LAB tab used to hide behind buttons.
+
+        Called from every decision cycle. Each job is cooldown-gated so a
+        5-minute cycle does not re-Monte-Carlo the book or re-scan 550
+        names. Failures never raise into the trading path.
+        """
+        ran: list[str] = []
+        universe = universe or []
+        chart_symbol = (chart_symbol
+                        or self._state.get("ui.chart_symbol")
+                        or "AAPL")
+        try:
+            if (len(self._broker.positions) >= 2
+                    and _cooldown_ok(self._state, "desk.stress", 1800)):
+                self.stress_test(n_paths=2000)
+                _mark_ran(self._state, "desk.stress")
+                ran.append("stress")
+        except Exception:
+            pass
+        try:
+            if universe and len(universe) >= 50:
+                scan = self.sector_scan(universe, account=account,
+                                        risk_pct=risk_pct)
+                if scan:
+                    held = set(self._broker.positions)
+                    alts = [n for n in (scan.get("names") or [])
+                            if n.get("ticker") not in held][:8]
+                    self._state.set("desk.alternatives", alts, source="desk")
+                    ran.append("sector")
+        except Exception:
+            pass
+        try:
+            if (self._broker.fills
+                    and _cooldown_ok(self._state, "desk.execution", 600)):
+                self.execution_quality_report(7)
+                _mark_ran(self._state, "desk.execution")
+                ran.append("execution")
+        except Exception:
+            pass
+        try:
+            if _cooldown_ok(self._state, "desk.flow", 600):
+                names = list(self._broker.positions)[:4]
+                if chart_symbol and chart_symbol not in names:
+                    names.append(chart_symbol)
+                for s in names:
+                    self.scan_flow_confluence(s)
+                _mark_ran(self._state, "desk.flow")
+                ran.append("flow")
+        except Exception:
+            pass
+        try:
+            if (self._lse and getattr(self._lse, "key", None) and chart_symbol
+                    and _cooldown_ok(self._state, "desk.surface", 1800)):
+                chain = self._lse.options_chain(chart_symbol)
+                self.ingest_chain(chart_symbol, chain)
+                _mark_ran(self._state, "desk.surface")
+                ran.append("surface")
+        except Exception:
+            pass
+        stamp = {"ts": time.time(), "ran": ran}
+        self._state.set("desk.last_refresh", stamp, source="desk")
+        return stamp
+
     def stress_test(self, horizon_days: int = 21, n_paths: int = 10_000) -> dict:
-        """P7g: 10,000 correlated Monte Carlo paths of the CURRENT book
-        (Ledoit-Wolf covariance, not independent per-symbol sims) ->
-        state.portfolio_stress + audit. On-demand (no scheduler exists
-        yet for genuine weekly automation — this is meant to be run
-        about that often). Its result is cached and read by step() every
-        cycle afterward to size next week's entries, until the next run
-        replaces it — this is the "feed into next week's risk budget"
-        mechanism."""
+        """P7g Monte Carlo of the current book. Cached; step() reads it."""
         pos = self._broker.positions
         if len(pos) < 1:
             return {"error": "no open positions to stress test"}
@@ -941,6 +1001,17 @@ class RuleOrchestrator:
             "Orchestrator", "DECISION CYCLE", model="rule-v1",
             reasoning=f"Decision cycle: scanning {len(symbols)} symbols",
             data={"n_symbols": len(symbols)})
+        try:
+            marks0 = {t: (self._state.get(f"quotes.{t}") or {}).get(
+                        "price", p["avg_price"])
+                      for t, p in self._broker.positions.items()}
+            self.refresh_desk(
+                universe=symbols,
+                chart_symbol=self._state.get("ui.chart_symbol"),
+                account=self._broker.equity(marks0) if marks0 else 10_000.0,
+                risk_pct=risk_pct)
+        except Exception:
+            pass
         fills = []
         prices_seen = {}
         may_enter = True
