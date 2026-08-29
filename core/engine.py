@@ -98,6 +98,7 @@ class Order:
     approved: bool = False          # stamped ONLY by RiskEngine
     veto_reason: str = ""
     stop: float | None = None       # optional initial stop, stamped on fill
+    slippage: float | None = None   # fraction; None → PaperBroker.SLIPPAGE
 
 
 class RiskEngine:
@@ -142,6 +143,20 @@ class RiskEngine:
                  f"gross exposure cap {self.cfg.max_gross_exposure_pct}%"))
             checks.append((notional <= broker.cash,
                            f"cash (${broker.cash:,.0f} available)"))
+            heat = 0.0
+            for t, p in broker.positions.items():
+                mark = float(p.get("avg_price") or 0)
+                stop_p = p.get("stop")
+                stop_p = float(stop_p) if stop_p is not None else mark * 0.94
+                heat += max(mark - stop_p, 0.0) * float(p.get("qty") or 0)
+            if order.stop is not None:
+                heat += max(price - float(order.stop), 0.0) * order.qty
+            else:
+                heat += price * 0.025 * order.qty
+            heat_cap = getattr(self.cfg, "max_book_heat_pct", 6.0)
+            checks.append((eq <= 0 or heat <= eq * heat_cap / 100,
+                           f"book heat cap {heat_cap}% of equity "
+                           f"(would be {heat / eq * 100:.1f}% if every stop hits)"))
             aum_basis = self.cfg.aum if self.cfg.aum > 0 else eq
             if (self.cfg.max_position_mode == "fixed"
                     and self.cfg.max_position_fixed_usd > 0):
@@ -299,8 +314,11 @@ class PaperBroker:
                                data={"order_id": order.id})
             return None
         with self._lock:
-            px = price * (1 + self.SLIPPAGE) if order.side == "BUY" \
-                else price * (1 - self.SLIPPAGE)
+            slip = (order.slippage if order.slippage is not None
+                    else self.SLIPPAGE)
+            slip = max(0.0, float(slip))
+            px = price * (1 + slip) if order.side == "BUY" \
+                else price * (1 - slip)
             fee = order.qty * px * self.COMMISSION
             if order.side == "BUY":
                 cost = order.qty * px + fee

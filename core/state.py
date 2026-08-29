@@ -72,6 +72,8 @@ class Config:
         default_factory=lambda: _env("RISK_MAX_POSITION_MODE", "pct"))  # "pct" | "fixed"
     max_position_fixed_usd: float = field(
         default_factory=lambda: float(_env("RISK_MAX_POSITION_FIXED_USD", "0")))
+    max_book_heat_pct: float = field(
+        default_factory=lambda: float(_env("RISK_MAX_BOOK_HEAT_PCT", "6")))
 
 
 # ---------------------------------------------------------------------------

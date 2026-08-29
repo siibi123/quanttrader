@@ -1433,6 +1433,22 @@ _desk = orch.refresh_desk(universe=["TREND"], chart_symbol="TREND",
 check("refresh_desk: returns a stamp and writes desk.last_refresh",
       isinstance(_desk, dict) and state.get("desk.last_refresh") is not None)
 
+from quant.scorecard import book_heat as _bheat, trade_stats as _tstats, vs_benchmark as _vb
+check("scorecard: empty fills are honest zeros, not fake edge",
+      _tstats([])["n_exits"] == 0 and _tstats([])["win_rate"] is None)
+check("scorecard: excess vs SPY is book minus benchmark",
+      _vb(5.0, 2.0)["excess_pct"] == 3.0)
+_bh = PaperBroker(cfg, bus, state, audit, path="runtime/_test/heat_broker.json")
+_oh = Order("HEAT", "BUY", 20, reason="wide stop", stop=50.0)
+_oh = risk.review(_oh, _bh, 100.0)
+check("risk: vetoes a ticket that would push book heat over 6%",
+      (not _oh.approved) and "heat" in (_oh.veto_reason or "").lower())
+_os = Order("SLIPX", "BUY", 2, reason="custom slip", slippage=0.01)
+_os.approved = True
+_fs = _bh.execute(_os, 100.0)
+check("broker: order.slippage overrides the 5bp default",
+      _fs and abs(_fs["price"] - 101.0) < 0.02)
+
 print("\n" + "=" * 44)
 passed = sum(1 for _, ok in results if ok)
 print(f"QUANTTRADER CORE: {passed}/{len(results)} PASS")

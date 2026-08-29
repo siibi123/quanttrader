@@ -221,11 +221,18 @@ with st.sidebar:
                   f"symbols (S&P 500 + Nasdaq-100)")
     with st.expander("CONFIGURATION", expanded=True):
         st.caption(f"Paper capital · ${cfg.starting_cash:,.0f}")
-        rp = st.slider("Risk per position %", 0.5, 3.0, 1.0, 0.25)
+        # Desk sizes every ticket. This number is a silent hard cap,
+        # not a per-trade target — no slider on the main path.
+        DESK_RISK_CAP = 1.0
+        rp = float(st.session_state.get("desk_risk_cap", DESK_RISK_CAP))
         state.set("ui.risk_pct", rp, source="ui")
-        st.caption("This is a CEILING. Each trade sizes below it from "
-                   "zone + weekly B-X + model agreement + news. "
-                   "A scalp will risk less than a 5/5 buy-zone swing.")
+        st.caption(f"Desk sizes each trade (zone, weekly, models, news, "
+                   f"book overlap). Hard cap {rp:.2f}% of AUM — not a "
+                   f"slider. Override only if you disagree with the desk.")
+        with st.expander("Override cap (optional)", expanded=False):
+            rp = st.slider("Hard cap % of AUM", 0.5, 3.0, rp, 0.25,
+                           key="desk_risk_cap")
+            state.set("ui.risk_pct", rp, source="ui")
         if "discount_zone" not in st.session_state:
             st.session_state.discount_zone = True
         discount_zone = st.toggle(
@@ -665,6 +672,31 @@ def _readable_cell(v):
 
 
 with t_metrics:
+    from quant.scorecard import book_heat, trade_stats, vs_benchmark
+    st.markdown("<div class='qt-kicker'>PM scorecard — vs SPY, not vanity P&L</div>",
+                unsafe_allow_html=True)
+    book_ret = (eq / broker.start_equity - 1) * 100 if broker.start_equity else 0.0
+    spy = state.get("benchmark.spy") or {}
+    alpha = vs_benchmark(book_ret, spy.get("ret_pct"))
+    ts = trade_stats(broker.fills)
+    ht = book_heat(broker.positions, marks)
+    heat_pct = (ht["heat_$"] / eq * 100) if eq else 0.0
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric("Book", f"{alpha['book_pct']:+.2f}%")
+    a2.metric("SPY (session)", "—" if alpha["spy_pct"] is None
+              else f"{alpha['spy_pct']:+.2f}%")
+    a3.metric("Excess vs SPY", "—" if alpha["excess_pct"] is None
+              else f"{alpha['excess_pct']:+.2f}%")
+    a4.metric("Heat to stops", f"{heat_pct:.1f}%")
+    st.caption("Excess is this process vs SPY since the desk started — "
+               "not a live audited track record. Heat = $ lost if every "
+               "stop hits, as % of equity (cap 6%).")
+    b1, b2, b3, b4 = st.columns(4)
+    b1.metric("Exits", ts["n_exits"])
+    b2.metric("Win %", "—" if ts["win_rate"] is None else f"{ts['win_rate']}%")
+    b3.metric("Expectancy / exit", "—" if ts["expectancy_$"] is None
+              else f"${ts['expectancy_$']:+.0f}")
+    b4.metric("PF", "—" if ts["profit_factor"] is None else str(ts["profit_factor"]))
     render_quote_strip()
     sig_d = state.get("signals") or {}
     if sig_d:

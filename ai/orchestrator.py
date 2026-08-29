@@ -787,6 +787,24 @@ class RuleOrchestrator:
                 ran.append("surface")
         except Exception:
             pass
+        try:
+            if _cooldown_ok(self._state, "desk.spy", 1800):
+                sdf = self._provider.get_candles("SPY", interval="1d",
+                                                 lookback="6mo")
+                if len(sdf):
+                    px = float(sdf["Close"].iloc[-1])
+                    base = self._state.get("benchmark.spy_base")
+                    if not base:
+                        self._state.set("benchmark.spy_base", px, source="desk")
+                        base = px
+                    self._state.set("benchmark.spy", {
+                        "price": round(px, 2),
+                        "ret_pct": round((px / float(base) - 1) * 100, 2),
+                    }, source="desk")
+                    _mark_ran(self._state, "desk.spy")
+                    ran.append("spy")
+        except Exception:
+            pass
         stamp = {"ts": time.time(), "ran": ran}
         self._state.set("desk.last_refresh", stamp, source="desk")
         return stamp
@@ -1165,6 +1183,8 @@ class RuleOrchestrator:
                     cost_note = (f" · expected cost {c['expected_cost_pct']}% "
                                 f"(${c['expected_cost_$']:,.2f}) vs expected "
                                 f"edge {ce.get('edge_pct', '—')}%")
+                    order.slippage = float(min(
+                        max(c.get("spread_pct", 0.1) / 200.0, 0.0003), 0.008))
                 bypass_note = (" · ⚠️ P7a INCUBATION gate BYPASSED (testing "
                                "mode)" if incubation_bypassed else "")
                 self._audit.record("Orchestrator", "PROPOSE BUY",
