@@ -15,6 +15,7 @@ from .bxtrender import bxtrender, weekly_alignment
 from .levels import fib_levels
 from .signals import atr, composite, rsi, sma
 from .sm_zones import classify_zone, market_mode
+from .setup_risk import size_setup
 
 
 def build_playbook(df: pd.DataFrame, account: float = 5000.0,
@@ -22,7 +23,8 @@ def build_playbook(df: pd.DataFrame, account: float = 5000.0,
                    in_position: bool = False,
                    entry: float | None = None,
                    stop: float | None = None,
-                   require_discount: bool = False) -> dict:
+                   require_discount: bool = False,
+                   fundamental: dict | None = None) -> dict:
     c = df["Close"]
     price = float(c.iloc[-1])
     a = float(atr(df).iloc[-1])
@@ -117,9 +119,7 @@ def build_playbook(df: pd.DataFrame, account: float = 5000.0,
         urgency = "⚪ NO TRADE"
     elif greens == 5 and (not require_discount or zone.get("in_discount")
                           or zone.get("in_buy_zone")):
-        instruction = (f"ENTER — all 5 gates green [{mode_txt} · {zone['label']}]: "
-                       f"buy {shares} shares ≈ ${price:,.2f}, stop ${stop_new:,.2f}, "
-                       f"scale ⅓ at ${scale1:,.2f} and ${scale2:,.2f}")
+        instruction = (f"ENTER — all 5 gates green [{mode_txt} · {zone['label']}]")
         urgency = "🟢 ACTIONABLE"
     elif greens == 5:
         instruction = (f"STALK — 5/5 at {zone['label']}, wait for buy zone "
@@ -130,8 +130,7 @@ def build_playbook(df: pd.DataFrame, account: float = 5000.0,
                         or mode_txt == "CAPITULATION"):
         pocket = (fib["levels"]["0.618"] if fib else None)
         instruction = (f"DIP SETUP — RSI2={r2:.0f} panic in an uptrend "
-                       f"[{mode_txt}]: scalp entry ≈ ${price:,.2f}, "
-                       f"stop ${stop_new:,.2f}, exit on RSI2 > 65"
+                       f"[{mode_txt}]"
                        + (f" · golden pocket ${pocket:,.2f}" if pocket else ""))
         urgency = "🟡 FAST SETUP"
     elif dip_setup:
@@ -149,6 +148,29 @@ def build_playbook(df: pd.DataFrame, account: float = 5000.0,
                        "No setup exists; capital preservation is the trade.")
         urgency = "⚪ NO TRADE"
 
+    budget = size_setup(
+        urgency=urgency, zone=zone, mode=mode, weekly=wk,
+        atr=a, price=price, account=account, risk_cap_pct=risk_pct,
+        comp_row=comp.iloc[-1], fundamental=fundamental,
+        df=df, comp=comp)
+    if urgency in ("🟢 ACTIONABLE", "🟡 FAST SETUP"):
+        stop_new = float(budget.get("stop") or (price - budget["stop_atr"] * a))
+        shares = budget["shares"]
+        scale1 = price + max(budget["stop_atr"], 1.0) * a
+        scale2 = price + 2 * max(budget["stop_atr"], 1.0) * a
+        if shares < 1:
+            instruction = (f"STAND DOWN — setup exists but size rounded to 0 "
+                           f"({budget['why_short']}).")
+            urgency = "⚪ NO TRADE"
+        else:
+            instruction = (
+                f"{instruction}: buy {shares} shares ≈ ${price:,.2f}, "
+                f"stop ${stop_new:,.2f} ({budget.get('stop_kind', 'ATR')}, "
+                f"{budget['stop_atr']} ATR) · "
+                f"risk {budget['risk_pct']:.2f}% AUM "
+                f"(${budget['dollar_risk']:,.0f} at risk) — "
+                f"{budget['why_short']}")
+
     nearest_sup = max((lv["price"] for lv in sr if lv["price"] < price),
                       default=None)
     nearest_res = min((lv["price"] for lv in sr if lv["price"] > price),
@@ -160,4 +182,5 @@ def build_playbook(df: pd.DataFrame, account: float = 5000.0,
                      "scale1": round(scale1, 2), "scale2": round(scale2, 2)},
             "nearest_support": nearest_sup, "nearest_resistance": nearest_res,
             "regime": reg["regime"],
-            "zone": zone, "market_mode": mode, "weekly": wk}
+            "zone": zone, "market_mode": mode, "weekly": wk,
+            "risk_budget": budget}

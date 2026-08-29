@@ -215,6 +215,9 @@ with st.sidebar:
         st.caption(f"Paper capital · ${cfg.starting_cash:,.0f}")
         rp = st.slider("Risk per position %", 0.5, 3.0, 1.0, 0.25)
         state.set("ui.risk_pct", rp, source="ui")
+        st.caption("This is a CEILING. Each trade sizes below it from "
+                   "zone + weekly B-X + model agreement + news. "
+                   "A scalp will risk less than a 5/5 buy-zone swing.")
         if "discount_zone" not in st.session_state:
             st.session_state.discount_zone = True
         discount_zone = st.toggle(

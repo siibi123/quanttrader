@@ -29,6 +29,7 @@ from data.news import NewsProvider
 from data.providers import DataProvider, LSEProvider
 from quant.anomaly_library import match_anomalies
 from quant.flow_confluence import confluence
+from quant.setup_risk import book_overlap_mult, high_impact_soon
 from quant.playbook import build_playbook
 from quant.correlation_monitor import CORRELATION_POLICY, correlation_regime
 from quant.daily_report import render_morning_briefing, render_report
@@ -205,11 +206,24 @@ class RuleOrchestrator:
                        axis=1).max(axis=1)
         return float(tr.rolling(n).mean().iloc[-1])
 
+    def _fundamental(self, symbol: str, df=None,
+                     held_candles: dict | None = None) -> dict:
+        news = self._state.get(f"news.{symbol}") or {}
+        out = {"bullish_pct": news.get("bullish_pct"),
+               "bearish_pct": news.get("bearish_pct"),
+               "high_impact_soon": high_impact_soon(self._state.get("macro"))}
+        if df is not None and held_candles:
+            m, note = book_overlap_mult(df, held_candles)
+            out["book_corr_mult"] = m
+            out["book_corr_note"] = note
+        return out
+
     def analyze(self, symbol: str, equity: float = 10000.0,
                 risk_pct: float = 1.0, held: dict | None = None,
                 regime: str | None = None,
                 candles: pd.DataFrame | None = None,
-                require_discount: bool = False) -> dict:
+                require_discount: bool = False,
+                held_candles: dict | None = None) -> dict:
         """QuantSignal fusion: the 5-gate Playbook + 7-model verdict drive
         the signal; the reasoning IS the playbook instruction.
 
@@ -253,7 +267,9 @@ class RuleOrchestrator:
                    "why": why}
         else:
             pb = build_playbook(df, account=equity, risk_pct=risk_pct,
-                                require_discount=require_discount)
+                                require_discount=require_discount,
+                                fundamental=self._fundamental(
+                                    symbol, df=df, held_candles=held_candles))
             sig = "BUY" if pb["urgency"] in ("🟢 ACTIONABLE",
                                              "🟡 FAST SETUP") else "NONE"
             z = pb.get("zone") or {}
@@ -266,6 +282,7 @@ class RuleOrchestrator:
                    "stop": pb.get("plan", {}).get("stop"),
                    "zone": z.get("label"),
                    "market_mode": md.get("mode"),
+                   "risk_pct": (pb.get("risk_budget") or {}).get("risk_pct"),
                    "why": why}
         self._state.set(f"signals.{symbol}", out, source="orchestrator")
         return out
@@ -981,7 +998,11 @@ class RuleOrchestrator:
             sig = self.analyze(s, equity=eq0, risk_pct=risk_pct,
                                held=held_pos, regime=rc["regime"],
                                candles=candles_by_symbol.get(s),
-                               require_discount=require_discount)
+                               require_discount=require_discount,
+                               held_candles={t: candles_by_symbol[t]
+                                             for t in self._broker.positions
+                                             if t in candles_by_symbol
+                                             and t != s})
             price = sig.get("price", 0)
             if price:
                 prices_seen[s] = price

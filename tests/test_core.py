@@ -1367,6 +1367,67 @@ check("broker: update_stop refuses a lower stop",
       _b_trail.update_stop("TRAILT", 80.0) is False
       and abs(_b_trail.positions["TRAILT"]["stop"] - 95.0) < 0.01)
 
+from quant.setup_risk import size_setup as _size_setup
+_zone_bz = {"in_buy_zone": True, "label": "BUY_ZONE"}
+_zone_disc = {"in_buy_zone": False, "label": "DISCOUNT"}
+_full = _size_setup(urgency="🟢 ACTIONABLE", zone=_zone_bz, mode={"mode": "EXPANSION"},
+                    weekly={"weekly_osc": 20}, atr=2.0, price=100.0,
+                    account=10000.0, risk_cap_pct=3.0)
+_scalp = _size_setup(urgency="🟡 FAST SETUP", zone=_zone_disc, mode={"mode": "CAPITULATION"},
+                     weekly={"weekly_osc": 5}, atr=2.0, price=100.0,
+                     account=10000.0, risk_cap_pct=3.0)
+check("setup_risk: buy-zone swing uses more of the cap than a scalp",
+      _full["risk_pct"] > _scalp["risk_pct"] and _full["stop_atr"] > _scalp["stop_atr"])
+check("setup_risk: never exceeds the owner cap",
+      _full["risk_pct"] <= 3.0 + 1e-9)
+_bear = _size_setup(urgency="🟢 ACTIONABLE", zone=_zone_bz, mode={"mode": "EXPANSION"},
+                    weekly={"weekly_osc": 20}, atr=2.0, price=100.0,
+                    account=10000.0, risk_cap_pct=3.0,
+                    fundamental={"bearish_pct": 80})
+check("setup_risk: bearish news cuts size vs the same technicals",
+      _bear["risk_pct"] < _full["risk_pct"])
+
+from quant.setup_risk import (structure_stop as _struct_stop,
+                              book_overlap_mult as _book_ov,
+                              high_impact_soon as _hisoon,
+                              ticker_edge_from_comp as _tedge)
+_ss = _struct_stop(100.0, 2.0, {"ote_lo": 96.0, "swing_low": 90.0}, 2.5)
+check("structure_stop: uses the zone (not raw ATR) when it sits 1-4 ATR away",
+      _ss["kind"] == "structure" and 95.0 < _ss["stop"] < 97.0)
+_ss_far = _struct_stop(100.0, 2.0, {"ote_lo": 70.0, "swing_low": 70.0}, 2.5)
+check("structure_stop: caps a distant swing at 4 ATR",
+      _ss_far["kind"] == "structure-far→4ATR" and abs(_ss_far["stop"] - 92.0) < 0.05)
+
+_idx = pd.bdate_range("2024-01-01", periods=80)
+_px = pd.Series(np.linspace(100, 140, 80), index=_idx)
+_held_df = pd.DataFrame({"Open": _px, "High": _px*1.01, "Low": _px*0.99,
+                         "Close": _px, "Volume": 1e6}, index=_idx)
+_cand_df = _held_df.copy()
+_bm, _bn = _book_ov(_cand_df, {"HELD": _held_df})
+check("book_overlap: identical series is treated as crowded",
+      _bm <= 0.40 and "crowded" in _bn)
+
+check("high_impact_soon: FOMC inside 24h is flagged",
+      _hisoon({"upcoming_events": [
+          {"event": "FOMC Rate Decision",
+           "date": (pd.Timestamp.utcnow() + pd.Timedelta(hours=12)).isoformat()}
+      ]}) is True)
+check("high_impact_soon: boring event is ignored",
+      _hisoon({"upcoming_events": [
+          {"event": "Existing Home Sales",
+           "date": (pd.Timestamp.utcnow() + pd.Timedelta(hours=12)).isoformat()}
+      ]}) is False)
+
+_sig = pd.Series(["HOLD"] * 80)
+_sig.iloc[50] = "BUY"
+_comp_e = pd.DataFrame({"signal": _sig}, index=_idx)
+# price rips after the BUY → positive edge
+_close_up = pd.Series(np.concatenate([np.full(51, 100.0), np.linspace(100, 120, 29)]),
+                      index=_idx)
+# not enough BUY samples (1) → mult 1.0
+check("ticker_edge: too few BUY samples is a no-op (mult 1.0)",
+      _tedge(_comp_e, _close_up)["mult"] == 1.0)
+
 print("\n" + "=" * 44)
 passed = sum(1 for _, ok in results if ok)
 print(f"QUANTTRADER CORE: {passed}/{len(results)} PASS")
