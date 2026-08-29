@@ -25,6 +25,7 @@ import threading
 import time
 
 from core.engine import AuditLog
+from core.gist_store import sync_runtime_file
 
 DD_CUT_START_PCT = 5.0
 DD_RISK_REDUCING_ONLY_PCT = 10.0
@@ -50,9 +51,10 @@ class DrawdownCircuitBreaker:
                 pass
 
     def _save(self):
-        os.makedirs(os.path.dirname(self._path), exist_ok=True)
+        os.makedirs(os.path.dirname(self._path) or ".", exist_ok=True)
         with open(self._path, "w") as f:
             json.dump(self._data, f, indent=1, default=str)
+        sync_runtime_file(self._path, immediate=False)
 
     @staticmethod
     def _multiplier(dd_pct: float) -> float:

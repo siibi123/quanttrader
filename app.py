@@ -20,6 +20,7 @@ from data.news import NewsProvider
 from data.providers import (CompositeProvider, LSEProvider, PollingFeed,
                             YahooProvider, filter_price_outliers)
 from data.universe import load_universe
+from core.gist_store import get_gist_store, hydrate_runtime
 
 st.set_page_config(page_title="QuantTrader", page_icon="◆", layout="wide",
                    initial_sidebar_state="expanded")
@@ -97,6 +98,10 @@ def get_engine():
     cfg = Config()
     bus = EventBus()
     state = GlobalState(bus)
+    # Restore runtime files from the private gist BEFORE AuditLog /
+    # PaperBroker / StrategyRegistry read them. Streamlit Cloud wipes
+    # runtime/ on every reboot; without this, every restart is a new book.
+    hydrate_runtime()
     audit = AuditLog(bus)
     lse = LSEProvider(cfg.lse_api_key, cfg.lse_base_url)
     news = NewsProvider(cfg.news_api_key)
@@ -258,26 +263,42 @@ with st.sidebar:
         strat_name = orch.STRATEGY_NAME
         s_status = registry.status(strat_name)
         counts = registry.signal_counts(strat_name)
+        n_logged = counts["total"]
         if s_status == StrategyRegistry.STATUS_PAPER:
             st.caption(f"🟢 PAPER — {strat_name}")
             st.caption("Promoted: entries execute normally.")
         else:
             st.caption(f"🔬 INCUBATION — {strat_name}")
-            st.caption(f"{counts['settled']}/{MIN_SIGNALS_TO_PROMOTE} settled "
-                       f"signals needed · new entries held back, signals "
-                       f"still logged")
+            if n_logged < MIN_SIGNALS_TO_PROMOTE:
+                st.caption(f"{n_logged}/{MIN_SIGNALS_TO_PROMOTE} signals logged · "
+                           "bypass locked ON so new entries still fill")
+            else:
+                st.caption(f"{counts['settled']}/{MIN_SIGNALS_TO_PROMOTE} settled "
+                           f"signals needed · new entries held back unless bypass is on")
+        force_bypass = (s_status != StrategyRegistry.STATUS_PAPER
+                        and n_logged < MIN_SIGNALS_TO_PROMOTE)
+        if "p7a_bypass" not in st.session_state:
+            st.session_state.p7a_bypass = True
+        if force_bypass:
+            st.session_state.p7a_bypass = True
         bypass_gate = st.toggle(
             f"P7a gate: INCUBATION (need {MIN_SIGNALS_TO_PROMOTE} signals) "
             "[BYPASS FOR TESTING]",
-            value=state.get("ui.bypass_incubation", True),
+            key="p7a_bypass",
+            disabled=force_bypass,
             help="ON: new-entry signals go straight to risk review and "
                  "execution even while INCUBATION, so the system trades "
-                 "from day one with zero history. Signals are still logged "
-                 "toward promotion either way. OFF: restores the normal "
-                 "P7a gate — new entries wait for promotion. Never affects "
-                 "exits, which are always allowed regardless of status.")
+                 "from day one with zero history. Forced ON until "
+                 f"{MIN_SIGNALS_TO_PROMOTE} signals are logged. Signals are "
+                 "still logged toward promotion either way. OFF: restores "
+                 "the normal P7a gate — new entries wait for promotion. "
+                 "Never affects exits, which are always allowed.")
         state.set("ui.bypass_incubation", bypass_gate, source="ui")
-        if bypass_gate and s_status != StrategyRegistry.STATUS_PAPER:
+        if force_bypass:
+            st.caption(f"Bypass locked ON until {MIN_SIGNALS_TO_PROMOTE} "
+                       f"signals are logged "
+                       f"({n_logged}/{MIN_SIGNALS_TO_PROMOTE}).")
+        elif bypass_gate and s_status != StrategyRegistry.STATUS_PAPER:
             st.caption("⚠️ Gate bypassed — entries execute despite INCUBATION.")
         st.caption(f"Signals: {counts['total']} total · {counts['settled']} "
                    f"settled · {counts['pending']} pending")
@@ -704,6 +725,13 @@ with t_trades:
         else:
             st.caption("No fills yet — only what survives the gates AND "
                        "the veto trades.")
+        gist = get_gist_store()
+        label = gist.last_saved_label()
+        if label:
+            st.caption(label)
+        else:
+            st.caption("Local runtime only — add GITHUB_TOKEN in Streamlit "
+                       "Secrets so trades survive Cloud restarts.")
 
 with t_lab:
     from quant.sltp_opt import optimize_sltp

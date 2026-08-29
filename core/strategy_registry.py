@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 
 from core.engine import AuditLog
+from core.gist_store import sync_runtime_file
 from quant.validation import bootstrap_mean_return, deflated_sharpe, haircut_pvalue, permutation_test
 
 MIN_SIGNALS_TO_PROMOTE = 20
@@ -52,9 +53,27 @@ class StrategyRegistry:
                 self._data = {}
 
     def _save(self):
-        os.makedirs(os.path.dirname(self._path), exist_ok=True)
+        os.makedirs(os.path.dirname(self._path) or ".", exist_ok=True)
         with open(self._path, "w") as f:
             json.dump(self._data, f, indent=1, default=str)
+        sync_runtime_file(self._path, immediate=False)
+
+    def should_bypass_incubation(self, strategy: str,
+                                 owner_bypass: bool) -> tuple[bool, bool]:
+        """Return (may_enter, incubation_bypassed).
+
+        Forced ON until MIN_SIGNALS_TO_PROMOTE signals have been logged so a
+        fresh install (or a Streamlit Cloud restart that wiped UI state)
+        actually trades. After that the owner's toggle controls it.
+        Promotion to PAPER always allows entries; this never gates exits.
+        """
+        still = self.status(strategy) != self.STATUS_PAPER
+        if not still:
+            return True, False
+        n = self.signal_counts(strategy)["total"]
+        forced = n < MIN_SIGNALS_TO_PROMOTE
+        effective = bool(owner_bypass) or forced
+        return effective, effective
 
     def _ensure(self, strategy: str) -> dict:
         return self._data.setdefault(strategy, {

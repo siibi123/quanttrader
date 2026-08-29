@@ -910,10 +910,13 @@ class RuleOrchestrator:
         if self._registry:
             self._registry.settle_signals(self.STRATEGY_NAME, self._settle_price)
             self._registry.evaluate_promotion(self.STRATEGY_NAME)
-            still_incubating = self._registry.status(self.STRATEGY_NAME) \
-                != StrategyRegistry.STATUS_PAPER
-            incubation_bypassed = bypass_incubation and still_incubating
-            may_enter = bypass_incubation or not still_incubating
+            # Forced ON until 20 signals are logged, then the caller's
+            # bypass_incubation flag (sidebar toggle) takes over. This is
+            # the P7a AAPL-shows-BUY-but-no-fill fix: a Cloud restart used
+            # to lose the toggle and silently hold every entry.
+            may_enter, incubation_bypassed = \
+                self._registry.should_bypass_incubation(
+                    self.STRATEGY_NAME, bypass_incubation)
 
         cb = None
         if self._circuit_breaker:

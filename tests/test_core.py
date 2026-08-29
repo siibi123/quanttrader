@@ -1,6 +1,6 @@
 """QuantTrader core test suite — every safety claim, verified."""
 import dataclasses
-import os, sys, time, shutil
+import os, sys, time, shutil, json
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # ISOLATION: every test-created file lives under runtime/_test/, never at
 # runtime/'s own root (audit.jsonl, broker.json, strategy_registry.json,
@@ -11,6 +11,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # test run -- on a dev machine that's also running the real app, that
 # wiped real trading/audit history. Never widen this back to "runtime".
 shutil.rmtree("runtime/_test", ignore_errors=True)
+
+# Pin the gist singleton to a disabled store so a developer machine (or
+# CI) with GITHUB_TOKEN in the environment cannot upload test fixtures
+# to a real gist.
+from core.gist_store import GistStore as _GistStore, reset_gist_store as _reset_gs
+_reset_gs(_GistStore(token="", runtime_dir="runtime"))
 
 import numpy as np
 import pandas as pd
@@ -563,8 +569,22 @@ orch7.analyze = lambda symbol, **kw: {
     "symbol": symbol, "signal": "BUY", "price": 100.0, "shares": 5,
     "why": "test forced buy", "urgency": "🟢 ACTIONABLE", "mode": "ENTRY",
     "gates": "5/5"}
-f1 = orch7.step(["P7AENTRY"], risk_pct=1.0)
-check("step(): INCUBATION blocks a new BUY entry but still logs the signal",
+# 0 logged signals: auto-bypass is forced ON even if the caller passes False
+# (this is the Streamlit Cloud / AAPL-shows-BUY-but-no-fill fix).
+f_auto = orch7.step(["P7AAUTO"], risk_pct=1.0, bypass_incubation=False)
+check("step(): auto-bypasses INCUBATION until 20 signals are logged",
+      len(f_auto) == 1 and "P7AAUTO" in broker.positions
+      and any(r["action"] == "PROPOSE BUY"
+             and r.get("data", {}).get("incubation_bypassed") is True
+             for r in audit.tail(20)))
+
+while reg7.signal_counts(orch7.STRATEGY_NAME)["total"] < MIN_SIGNALS_TO_PROMOTE:
+    reg7.log_signal(orch7.STRATEGY_NAME, "SEEDLOG", "BUY", 100.0, horizon_days=10)
+check("strategy_registry: 20 logged signals reach the auto-bypass threshold",
+      reg7.signal_counts(orch7.STRATEGY_NAME)["total"] >= MIN_SIGNALS_TO_PROMOTE)
+
+f1 = orch7.step(["P7AENTRY"], risk_pct=1.0, bypass_incubation=False)
+check("step(): INCUBATION blocks a new BUY once 20 signals are logged and bypass is off",
       len(f1) == 0 and "P7AENTRY" not in broker.positions
       and any(r["action"] == "SIGNAL LOGGED (INCUBATION)"
              for r in audit.tail(20)))
@@ -1216,6 +1236,92 @@ _sched_mod.market_status = _orig_ms
 sched.shutdown()
 check("scheduler: shutdown() stops cleanly",
       sched.status()["running"] is False)
+
+# ---- 61. AuditLog reloads jsonl into memory (Streamlit Cloud restart)
+_reload_path = "runtime/_test/audit_reload.jsonl"
+os.makedirs("runtime/_test", exist_ok=True)
+with open(_reload_path, "w") as f:
+    f.write(json.dumps({"id": "r1", "ts": 1, "actor": "T", "action": "HELLO",
+                        "trigger": "", "model": "", "reasoning": "reloaded",
+                        "data": {}}) + "\n")
+audit_re = AuditLog(bus, path=_reload_path)
+check("audit: reloads existing jsonl into memory on init",
+      any(r["action"] == "HELLO" for r in audit_re.tail(5)))
+
+# ---- 62. Gist persistence: no token → local only; token → hydrate + PATCH
+from core.gist_store import GistStore, reset_gist_store, GIST_DESCRIPTION
+
+class _FakeResp:
+    def __init__(self, status, payload):
+        self.status_code = status
+        self._payload = payload
+    def json(self):
+        return self._payload
+
+_gdir = "runtime/_test/gist_h"
+shutil.rmtree(_gdir, ignore_errors=True)
+os.makedirs(_gdir, exist_ok=True)
+
+_local_only = GistStore(token="", gist_id="", runtime_dir=_gdir)
+check("gist: disabled without GITHUB_TOKEN", not _local_only.enabled)
+check("gist: does not track files when disabled",
+      not _local_only.tracks(os.path.join(_gdir, "broker.json")))
+check("gist: last_saved_label is None without a token",
+      _local_only.last_saved_label() is None)
+
+# live store must refuse runtime/_test/ files even with a token
+_live = GistStore(token="tok", gist_id="x", runtime_dir="runtime")
+check("gist: live store never tracks runtime/_test isolation files",
+      not _live.tracks("runtime/_test/broker.json"))
+
+_http = {"get": [], "post": [], "patch": []}
+_broker_payload = json.dumps({
+    "cash": 42.0, "start_equity": 42.0, "day_start_equity": 42.0,
+    "positions": {"AAPL": {"qty": 3, "avg_price": 100.0}}, "fills": []})
+
+def _g_get(url, **kw):
+    _http["get"].append(url)
+    if url.endswith("/abc123"):
+        return _FakeResp(200, {
+            "id": "abc123", "description": GIST_DESCRIPTION,
+            "files": {"broker.json": {"content": _broker_payload},
+                      "audit.jsonl": {"content": ""}}})
+    return _FakeResp(200, [])
+
+def _g_post(url, **kw):
+    _http["post"].append(url)
+    return _FakeResp(201, {"id": "newid", "files": {}})
+
+def _g_patch(url, **kw):
+    _http["patch"].append(kw.get("json") or {})
+    return _FakeResp(200, {"id": "abc123"})
+
+_gs = GistStore(token="tok", gist_id="abc123", runtime_dir=_gdir,
+                http_get=_g_get, http_post=_g_post, http_patch=_g_patch)
+check("gist: hydrate restores broker.json from the gist",
+      _gs.hydrate() and os.path.exists(os.path.join(_gdir, "broker.json")))
+with open(os.path.join(_gdir, "broker.json")) as f:
+    _restored = json.load(f)
+check("gist: hydrated broker cash/positions match gist payload",
+      _restored["cash"] == 42.0 and "AAPL" in _restored["positions"])
+
+_gs.queue(os.path.join(_gdir, "broker.json"), immediate=True)
+check("gist: immediate queue PATCHes the gist and stamps last_saved_ts",
+      _gs.last_saved_ts is not None and len(_http["patch"]) == 1
+      and "broker.json" in _http["patch"][0]["files"])
+check("gist: last_saved_label mentions GitHub",
+      "Last saved to GitHub" in (_gs.last_saved_label() or ""))
+
+# PaperBroker._save with a test-dir path must NOT hit the process singleton
+reset_gist_store(GistStore(token="tok", gist_id="abc123", runtime_dir="runtime",
+                           http_get=_g_get, http_post=_g_post, http_patch=_g_patch))
+_pre_patches = len(_http["patch"])
+_b_g = PaperBroker(cfg, bus, state, audit, path="runtime/_test/broker_gist.json")
+o_g = Order("MSFT", "BUY", 1, reason="gist isolation"); o_g.approved = True
+_b_g.execute(o_g, 50.0)
+check("gist: PaperBroker save under runtime/_test does not PATCH the live gist",
+      len(_http["patch"]) == _pre_patches)
+reset_gist_store(_GistStore(token="", runtime_dir="runtime"))
 
 print("\n" + "=" * 44)
 passed = sum(1 for _, ok in results if ok)

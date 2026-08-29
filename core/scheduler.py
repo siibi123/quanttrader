@@ -46,7 +46,7 @@ class TradingScheduler:
     comment for why that's expensive)."""
 
     def __init__(self, orch, symbols_fn, risk_pct_fn=lambda: 1.0,
-                bypass_incubation_fn=lambda: False, universe_fn=None):
+                bypass_incubation_fn=lambda: True, universe_fn=None):
         self._orch = orch
         self._symbols_fn = symbols_fn
         self._risk_pct_fn = risk_pct_fn

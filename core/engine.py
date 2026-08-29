@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 from .state import Config, Event, EventBus, GlobalState
+from .gist_store import sync_runtime_file
 
 
 # ---------------------------------------------------------------------------
@@ -35,7 +36,28 @@ class AuditLog:
         self._path = path
         self._mem: deque[dict] = deque(maxlen=1000)
         self._lock = threading.RLock()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        self._load()
+
+    def _load(self):
+        """Rehydrate the in-memory tail from disk (and therefore from the
+        gist, which hydrate_runtime() writes here before we are constructed).
+        Without this, a Streamlit Cloud restart showed an empty AUDIT tab
+        even after the jsonl file itself was restored."""
+        if not os.path.exists(self._path):
+            return
+        try:
+            with open(self._path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        self._mem.append(json.loads(line))
+                    except Exception:
+                        continue
+        except Exception:
+            pass
 
     def record(self, actor: str, action: str, trigger: str = "",
                model: str = "", reasoning: str = "",
@@ -50,6 +72,7 @@ class AuditLog:
                     f.write(json.dumps(rec, default=str) + "\n")
             except Exception:
                 pass
+            sync_runtime_file(self._path, immediate=False)
         self._bus.publish(Event("audit.record", rec, source=actor))
         return rec
 
@@ -218,12 +241,13 @@ class PaperBroker:
                 pass
 
     def _save(self):
-        os.makedirs(os.path.dirname(self._path), exist_ok=True)
+        os.makedirs(os.path.dirname(self._path) or ".", exist_ok=True)
         with open(self._path, "w") as f:
             json.dump({"cash": self.cash, "start_equity": self.start_equity,
                        "day_start_equity": self.day_start_equity,
                        "positions": self.positions, "fills": self.fills},
                       f, indent=1, default=str)
+        sync_runtime_file(self._path, immediate=True)
 
     # ---- accounting --------------------------------------------------------
     def position_value(self, ticker: str, price: float) -> float:
