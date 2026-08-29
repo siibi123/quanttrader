@@ -1000,13 +1000,20 @@ with t_audit:
     tail = audit.tail(50)
     if tail:
         for r in reversed(tail):
-            veto = "VETO" in r["action"]
+            action = str(r.get("action") or "")
+            if not action:
+                continue
+            veto = "VETO" in action
+            try:
+                ts_lbl = time.strftime(
+                    "%H:%M:%S", time.localtime(float(r.get("ts") or 0)))
+            except Exception:
+                ts_lbl = ""
             st.markdown(
                 f"<div class='qt-audit{' veto' if veto else ''}'>"
-                f"<span class='who'>{r['actor']}</span> · {r['action']}"
-                f"<span class='t'>"
-                f"{time.strftime('%H:%M:%S', time.localtime(r['ts']))}</span>"
-                f"<br>{r['reasoning']}</div>", unsafe_allow_html=True)
+                f"<span class='who'>{r.get('actor') or '?'}</span> · {action}"
+                f"<span class='t'>{ts_lbl}</span>"
+                f"<br>{r.get('reasoning') or ''}</div>", unsafe_allow_html=True)
     else:
         st.caption("Nothing yet — run a decision cycle.")
 
