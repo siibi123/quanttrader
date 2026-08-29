@@ -11,16 +11,18 @@ import numpy as np
 import pandas as pd
 
 from .advanced import regime_quadrant, support_resistance
-from .bxtrender import bxtrender
+from .bxtrender import bxtrender, weekly_alignment
 from .levels import fib_levels
 from .signals import atr, composite, rsi, sma
+from .sm_zones import classify_zone, market_mode
 
 
 def build_playbook(df: pd.DataFrame, account: float = 5000.0,
                    risk_pct: float = 1.0,
                    in_position: bool = False,
                    entry: float | None = None,
-                   stop: float | None = None) -> dict:
+                   stop: float | None = None,
+                   require_discount: bool = False) -> dict:
     c = df["Close"]
     price = float(c.iloc[-1])
     a = float(atr(df).iloc[-1])
@@ -50,6 +52,9 @@ def build_playbook(df: pd.DataFrame, account: float = 5000.0,
     ]
     dip_setup = (not np.isnan(s200) and price > s200 and r2 < 10)
     greens = sum(1 for _, ok, _ in gates if ok)
+    zone = classify_zone(df)
+    mode = market_mode(df)
+    wk = weekly_alignment(df)
 
     # levels for a fresh entry
     stop_new = price - 2.5 * a
@@ -90,21 +95,49 @@ def build_playbook(df: pd.DataFrame, account: float = 5000.0,
                 "urgency": urgency, "r_now": round(r_now, 2),
                 "gates": gates, "greens": greens,
                 "trail_suggestion": round(trail, 2),
-                "regime": reg["regime"]}
+                "regime": reg["regime"],
+                "zone": zone, "market_mode": mode, "weekly": wk}
 
     # flat: enter, stalk or stand down
-    if greens == 5:
-        instruction = (f"ENTER — all 5 gates green: buy {shares} shares "
-                       f"≈ ${price:,.2f}, stop ${stop_new:,.2f}, "
+    wk_ok = wk.get("weekly_osc") is None or float(wk["weekly_osc"]) > 0
+    zone_txt = (f"zone {zone['label']} ${zone['swing_low']:,.2f}–"
+                f"${zone['swing_high']:,.2f}" if zone.get("swing_high")
+                else "zone n/a")
+    mode_txt = mode.get("mode") or "UNKNOWN"
+
+    if require_discount and greens == 5 and zone.get("in_premium"):
+        instruction = (f"STAND DOWN — 5/5 gates but PREMIUM of the swing "
+                       f"({zone_txt}). Buy zone "
+                       f"${zone.get('ote_lo') or 0:,.2f}–"
+                       f"${zone.get('ote_hi') or 0:,.2f}. Don't overpay.")
+        urgency = "⚪ NO TRADE"
+    elif require_discount and greens == 5 and not wk_ok:
+        instruction = (f"STAND DOWN — daily 5/5 but weekly B-X is negative "
+                       f"({wk.get('weekly_osc')}). Higher timeframe veto.")
+        urgency = "⚪ NO TRADE"
+    elif greens == 5 and (not require_discount or zone.get("in_discount")
+                          or zone.get("in_buy_zone")):
+        instruction = (f"ENTER — all 5 gates green [{mode_txt} · {zone['label']}]: "
+                       f"buy {shares} shares ≈ ${price:,.2f}, stop ${stop_new:,.2f}, "
                        f"scale ⅓ at ${scale1:,.2f} and ${scale2:,.2f}")
         urgency = "🟢 ACTIONABLE"
-    elif dip_setup:
+    elif greens == 5:
+        instruction = (f"STALK — 5/5 at {zone['label']}, wait for buy zone "
+                       f"${zone.get('ote_lo') or 0:,.2f}–"
+                       f"${zone.get('ote_hi') or 0:,.2f}. Set an alert.")
+        urgency = "🟡 WATCH"
+    elif dip_setup and (not require_discount or zone.get("in_discount")
+                        or mode_txt == "CAPITULATION"):
         pocket = (fib["levels"]["0.618"] if fib else None)
-        instruction = (f"DIP SETUP — RSI2={r2:.0f} panic in an uptrend: "
-                       f"scalp entry ≈ ${price:,.2f}, stop ${stop_new:,.2f},"
-                       f" exit on RSI2 > 65"
+        instruction = (f"DIP SETUP — RSI2={r2:.0f} panic in an uptrend "
+                       f"[{mode_txt}]: scalp entry ≈ ${price:,.2f}, "
+                       f"stop ${stop_new:,.2f}, exit on RSI2 > 65"
                        + (f" · golden pocket ${pocket:,.2f}" if pocket else ""))
         urgency = "🟡 FAST SETUP"
+    elif dip_setup:
+        instruction = (f"STAND DOWN — RSI panic but still {zone['label']}. "
+                       "Wait for the discount zone, don't chase.")
+        urgency = "⚪ NO TRADE"
     elif greens >= 3:
         missing = [name for name, ok, _ in gates if not ok]
         instruction = ("STALK — close but blocked by: " +
@@ -126,4 +159,5 @@ def build_playbook(df: pd.DataFrame, account: float = 5000.0,
                      "stop": round(stop_new, 2),
                      "scale1": round(scale1, 2), "scale2": round(scale2, 2)},
             "nearest_support": nearest_sup, "nearest_resistance": nearest_res,
-            "regime": reg["regime"]}
+            "regime": reg["regime"],
+            "zone": zone, "market_mode": mode, "weekly": wk}

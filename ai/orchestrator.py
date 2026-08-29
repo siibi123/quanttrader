@@ -208,7 +208,8 @@ class RuleOrchestrator:
     def analyze(self, symbol: str, equity: float = 10000.0,
                 risk_pct: float = 1.0, held: dict | None = None,
                 regime: str | None = None,
-                candles: pd.DataFrame | None = None) -> dict:
+                candles: pd.DataFrame | None = None,
+                require_discount: bool = False) -> dict:
         """QuantSignal fusion: the 5-gate Playbook + 7-model verdict drive
         the signal; the reasoning IS the playbook instruction.
 
@@ -231,22 +232,41 @@ class RuleOrchestrator:
                                 in_position=True,
                                 entry=float(held["avg_price"]),
                                 stop=float(held.get(
-                                    "stop", held["avg_price"] * stop_frac)))
-            sig = "SELL" if any(k in pb["instruction"]
-                                for k in ("EXIT", "TIGHTEN")) else "NONE"
+                                    "stop", held["avg_price"] * stop_frac)),
+                                require_discount=require_discount)
+            instr = pb["instruction"]
+            if "EXIT" in instr:
+                sig = "SELL"
+            elif "TIGHTEN" in instr:
+                sig = "TRAIL"
+            else:
+                sig = "NONE"
+            why = f"EXIT — {instr}" if sig == "SELL" else (
+                f"HOLD/TRAIL — {instr}" if sig == "TRAIL"
+                else f"PLAYBOOK {pb['urgency']}: {instr}")
             out = {"symbol": symbol, "signal": sig, "price": price,
                    "urgency": pb["urgency"], "mode": "MANAGE",
                    "gates": f"{pb['greens']}/5",
-                   "why": f"PLAYBOOK {pb['urgency']}: {pb['instruction']}"}
+                   "new_stop": pb.get("trail_suggestion"),
+                   "zone": (pb.get("zone") or {}).get("label"),
+                   "market_mode": (pb.get("market_mode") or {}).get("mode"),
+                   "why": why}
         else:
-            pb = build_playbook(df, account=equity, risk_pct=risk_pct)
+            pb = build_playbook(df, account=equity, risk_pct=risk_pct,
+                                require_discount=require_discount)
             sig = "BUY" if pb["urgency"] in ("🟢 ACTIONABLE",
                                              "🟡 FAST SETUP") else "NONE"
+            z = pb.get("zone") or {}
+            md = pb.get("market_mode") or {}
+            why = (f"ENTRY — {pb['instruction']}")
             out = {"symbol": symbol, "signal": sig, "price": price,
                    "urgency": pb["urgency"], "mode": "ENTRY",
                    "gates": f"{pb['greens']}/5",
                    "shares": pb.get("plan", {}).get("shares", 0),
-                   "why": f"PLAYBOOK {pb['urgency']}: {pb['instruction']}"}
+                   "stop": pb.get("plan", {}).get("stop"),
+                   "zone": z.get("label"),
+                   "market_mode": md.get("mode"),
+                   "why": why}
         self._state.set(f"signals.{symbol}", out, source="orchestrator")
         return out
 
@@ -880,7 +900,8 @@ class RuleOrchestrator:
         return out
 
     def step(self, symbols: list[str], risk_pct: float = 1.0,
-             bypass_incubation: bool = False) -> list[dict]:
+             bypass_incubation: bool = False,
+             require_discount: bool = False) -> list[dict]:
         """One decision cycle over the watchlist. Returns executed fills.
 
         bypass_incubation: owner-controlled escape hatch (sidebar toggle,
@@ -959,7 +980,8 @@ class RuleOrchestrator:
             pol = rc["policy"]
             sig = self.analyze(s, equity=eq0, risk_pct=risk_pct,
                                held=held_pos, regime=rc["regime"],
-                               candles=candles_by_symbol.get(s))
+                               candles=candles_by_symbol.get(s),
+                               require_discount=require_discount)
             price = sig.get("price", 0)
             if price:
                 prices_seen[s] = price
@@ -1042,7 +1064,8 @@ class RuleOrchestrator:
                         data={"symbol": s, "signal": "BUY", "price": price,
                              "raw_shares": sig.get("shares")})
                     continue
-                order = Order(s, "BUY", qty, reason=sig["why"])
+                order = Order(s, "BUY", qty, reason=sig["why"],
+                              stop=sig.get("stop"))
                 ce = self._cost_and_edge(s, qty, price, eq0, risk_pct, "BUY")
                 cost_note = ""
                 if ce.get("cost"):
@@ -1068,6 +1091,17 @@ class RuleOrchestrator:
                     f = self._broker.execute(order, price)
                     if f:
                         fills.append(f)
+            elif sig["signal"] == "TRAIL" and held:
+                new_stop = sig.get("new_stop")
+                if new_stop:
+                    moved = self._broker.update_stop(s, float(new_stop))
+                    self._audit.record(
+                        "Orchestrator", "TRAIL STOP",
+                        trigger=f"signals.{s}", model="rule-v1",
+                        reasoning=(sig["why"] + ("" if moved
+                                   else " · stop not raised (already higher)")),
+                        data={"symbol": s, "new_stop": new_stop,
+                              "moved": moved})
             elif sig["signal"] == "SELL" and held:
                 # exits are never gated by the promotion status
                 order = Order(s, "SELL", held, reason=sig["why"])

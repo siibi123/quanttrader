@@ -31,7 +31,7 @@ API = "https://api.github.com/gists"
 # GitHub returns 422 if ANY gist file is empty / whitespace-only.
 _EMPTY = {
     "broker.json": "{}",
-    "audit.jsonl": "{\"id\":\"init\",\"action\":\"GIST_INIT\"}\n",
+    "audit.jsonl": "# quanttrader audit log\n",
     "strategy_registry.json": "{}",
     "circuit_breaker.json": "{}",
 }
@@ -59,6 +59,7 @@ class GistStore:
         self._post = http_post or requests.post
         self._patch = http_patch or requests.patch
 
+    # ---- HTTP --------------------------------------------------------------
     def _headers(self) -> dict:
         return {
             "Authorization": f"Bearer {self.token}",
@@ -70,6 +71,9 @@ class GistStore:
     def tracks(self, path: str) -> bool:
         if not self.enabled or os.path.basename(path) not in TRACKED:
             return False
+        # The live store (runtime/) must never upload pytest isolation
+        # files. A test-constructed store whose runtime_dir itself lives
+        # under runtime/_test/ is allowed to sync its own files.
         live = os.path.abspath(self.runtime_dir)
         p = os.path.abspath(path)
         test_root = os.path.abspath(os.path.join("runtime", "_test"))
@@ -104,7 +108,10 @@ class GistStore:
             return f"GitHub save failed · {self.last_error}"
         return "GitHub persistence armed · waiting for first save"
 
+    # ---- hydrate on startup ------------------------------------------------
     def hydrate(self) -> bool:
+        """Pull gist → write local runtime files. Returns True if anything
+        was restored. Safe to call more than once; subsequent calls no-op."""
         with self._lock:
             if self._hydrated or not self.enabled:
                 self._hydrated = True
@@ -123,6 +130,9 @@ class GistStore:
                     if not content or not str(content).strip():
                         continue
                     dest = os.path.join(self.runtime_dir, name)
+                    # Don't clobber a non-empty local file with gist emptiness;
+                    # a local file on a VPS is the source of truth until the
+                    # first successful save uploads it.
                     if os.path.exists(dest) and os.path.getsize(dest) > 2:
                         continue
                     with open(dest, "w") as f:
@@ -143,6 +153,7 @@ class GistStore:
             if r.status_code == 200:
                 return r.json()
             self.last_error = f"GET gist {self._api_err(r)}"
+            # fall through and try to find/create rather than give up
         r = self._get(API, headers=self._headers(),
                       params={"per_page": 100}, timeout=20)
         if r.status_code != 200:
@@ -151,6 +162,7 @@ class GistStore:
         for g in r.json():
             if g.get("description") == GIST_DESCRIPTION:
                 self.gist_id = g["id"]
+                # list payload omits file contents — fetch the full gist
                 full = self._get(f"{API}/{self.gist_id}",
                                  headers=self._headers(), timeout=20)
                 if full.status_code == 200:
@@ -168,6 +180,7 @@ class GistStore:
         self.gist_id = body.get("id", "")
         return body
 
+    # ---- save --------------------------------------------------------------
     def queue(self, path: str, immediate: bool = False) -> None:
         if not self.tracks(path):
             return
@@ -215,6 +228,8 @@ class GistStore:
                     content = _EMPTY.get(name, "{}")
                 if not content.strip():
                     content = _EMPTY.get(name, "{}")
+                # Gist per-file cap is 10 MB. Keep a tail of the audit log
+                # rather than fail the whole save.
                 if len(content) > 9_000_000 and name == "audit.jsonl":
                     lines = content.splitlines()[-5000:]
                     content = "\n".join(lines) + "\n"
@@ -250,6 +265,7 @@ def get_gist_store() -> GistStore:
 
 
 def reset_gist_store(store: GistStore | None = None) -> None:
+    """Tests only — swap or clear the process singleton."""
     global _STORE
     with _STORE_LOCK:
         _STORE = store

@@ -53,9 +53,12 @@ class AuditLog:
                     if not line:
                         continue
                     try:
-                        self._mem.append(json.loads(line))
+                        rec = json.loads(line)
                     except Exception:
                         continue
+                    if not isinstance(rec, dict) or "action" not in rec or "actor" not in rec:
+                        continue
+                    self._mem.append(rec)
         except Exception:
             pass
 
@@ -94,6 +97,7 @@ class Order:
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     approved: bool = False          # stamped ONLY by RiskEngine
     veto_reason: str = ""
+    stop: float | None = None       # optional initial stop, stamped on fill
 
 
 class RiskEngine:
@@ -269,6 +273,24 @@ class PaperBroker:
     def positions_dict(self) -> dict:
         return json.loads(json.dumps(self.positions))
 
+    def update_stop(self, ticker: str, stop: float) -> bool:
+        """Ratchet a long stop up (never down). Persists with the book."""
+        with self._lock:
+            p = self.positions.get(ticker)
+            if not p:
+                return False
+            new = round(float(stop), 2)
+            old = p.get("stop")
+            if old is not None and new <= float(old):
+                return False
+            p["stop"] = new
+            self._save()
+        self._audit.record("PaperBroker", "TRAIL STOP",
+                           reasoning=f"{ticker}: stop → ${new:.2f}"
+                                     + (f" (from ${old:.2f})" if old else ""),
+                           data={"ticker": ticker, "stop": new, "prev": old})
+        return True
+
     # ---- execution ---------------------------------------------------------
     def execute(self, order: Order, price: float) -> dict | None:
         if not order.approved:
@@ -290,6 +312,10 @@ class PaperBroker:
                 tot = p["qty"] * p["avg_price"] + order.qty * px
                 p["qty"] += order.qty
                 p["avg_price"] = tot / p["qty"]
+                if order.stop:
+                    p["stop"] = round(float(order.stop), 2)
+                elif "stop" not in p:
+                    p["stop"] = round(px * 0.94, 2)
                 realized = 0.0
             else:
                 p = self.positions.get(order.ticker)

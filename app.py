@@ -142,6 +142,7 @@ def get_engine():
         # entry forever, so the system trades from day one until the
         # owner turns it off.
         bypass_incubation_fn=lambda: state.get("ui.bypass_incubation", True),
+        require_discount_fn=lambda: bool(state.get("ui.discount_zone", True)),
         # the decision cycle AND sector_scan's candidate ranking both
         # scan this same cached full universe.
         universe_fn=lambda: universe)
@@ -214,6 +215,19 @@ with st.sidebar:
         st.caption(f"Paper capital · ${cfg.starting_cash:,.0f}")
         rp = st.slider("Risk per position %", 0.5, 3.0, 1.0, 0.25)
         state.set("ui.risk_pct", rp, source="ui")
+        if "discount_zone" not in st.session_state:
+            st.session_state.discount_zone = True
+        discount_zone = st.toggle(
+            "Discount-zone filter (don't buy premium)",
+            key="discount_zone",
+            help="Stand aside when the name is expensive in its last swing. "
+                 "Buy the 0.618–0.786 discount pocket. B-X flipping negative "
+                 "raises the stop instead of dumping the whole position.")
+        state.set("ui.discount_zone", discount_zone, source="ui")
+        if discount_zone:
+            st.caption("Swing mode ON · wait for discount · trail on TIGHTEN")
+        else:
+            st.caption("Filter OFF · original 5-gate playbook")
         deep = st.toggle("Options greeks pass (LSE)",
                          value=bool(cfg.lse_api_key),
                          disabled=not cfg.lse_api_key,
@@ -459,6 +473,7 @@ def render_open_book():
         exposure_basis = aum_in if aum_in > 0 else eq_now
         rows = [{"ticker": t, "qty": p["qty"],
                 "avg": round(p["avg_price"], 2),
+                "stop": round(p["stop"], 2) if p.get("stop") else "—",
                 "mark": marks_now.get(t, "—"),
                 "P&L $": round((marks_now.get(t, p["avg_price"]) -
                                 p["avg_price"]) * p["qty"], 0),
@@ -544,7 +559,8 @@ if run:
             orch.scan_macro()
             orch.scan_flow(chart_sym)
         new_fills = orch.step(E["universe"], risk_pct=rp,
-                              bypass_incubation=bypass_gate)
+                              bypass_incubation=bypass_gate,
+                              require_discount=discount_zone)
     st.toast(f"Forced cycle complete — {len(new_fills)} fill(s) · research + "
              f"news/macro/flow in AUDIT")
 
@@ -713,16 +729,29 @@ with t_trades:
                     f"trend {corr_reg['trend_slope_per_day']:+.5f}/day"
                     f"</div>", unsafe_allow_html=True)
     with c2:
-        st.markdown("### Fills")
         if broker.fills:
             fd = pd.DataFrame(broker.fills[::-1])
             fd["time"] = pd.to_datetime(fd["ts"], unit="s").dt.strftime(
                 "%m-%d %H:%M")
-            st.dataframe(fd[["time", "ticker", "side", "qty", "price",
-                             "realized", "reason"]],
-                         use_container_width=True, hide_index=True,
-                         height=320)
+            buys = fd[fd["side"] == "BUY"]
+            sells = fd[fd["side"] == "SELL"]
+            st.markdown("### Entries — why we got in")
+            if len(buys):
+                st.dataframe(buys[["time", "ticker", "qty", "price", "reason"]],
+                             use_container_width=True, hide_index=True,
+                             height=220)
+            else:
+                st.caption("No entries yet.")
+            st.markdown("### Exits — why we got out")
+            if len(sells):
+                st.dataframe(sells[["time", "ticker", "qty", "price",
+                                    "realized", "reason"]],
+                             use_container_width=True, hide_index=True,
+                             height=220)
+            else:
+                st.caption("No exits yet.")
         else:
+            st.markdown("### Fills")
             st.caption("No fills yet — only what survives the gates AND "
                        "the veto trades.")
         gist = get_gist_store()

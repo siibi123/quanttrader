@@ -46,12 +46,14 @@ class TradingScheduler:
     comment for why that's expensive)."""
 
     def __init__(self, orch, symbols_fn, risk_pct_fn=lambda: 1.0,
-                bypass_incubation_fn=lambda: True, universe_fn=None):
+                bypass_incubation_fn=lambda: True, universe_fn=None,
+                require_discount_fn=lambda: True):
         self._orch = orch
         self._symbols_fn = symbols_fn
         self._risk_pct_fn = risk_pct_fn
         self._bypass_incubation_fn = bypass_incubation_fn
         self._universe_fn = universe_fn or symbols_fn
+        self._require_discount_fn = require_discount_fn
         self.scheduler = BackgroundScheduler(timezone=ET)
         self._started = False
 
@@ -68,7 +70,8 @@ class TradingScheduler:
         symbols = self._universe_fn()
         if symbols:
             self._orch.step(symbols, risk_pct=self._risk_pct_fn(),
-                            bypass_incubation=self._bypass_incubation_fn())
+                            bypass_incubation=self._bypass_incubation_fn(),
+                            require_discount=self._require_discount_fn())
 
     def _run_daily_report(self):
         self._orch.daily_report(watchlist=self._symbols_fn(),

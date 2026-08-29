@@ -1202,7 +1202,7 @@ import core.scheduler as _sched_mod
 
 _sched_calls = {"n": 0}
 class _FakeOrchForSched:
-    def step(self, symbols, risk_pct=1.0, bypass_incubation=False):
+    def step(self, symbols, risk_pct=1.0, bypass_incubation=False, **kwargs):
         _sched_calls["n"] += 1
         return []
     def daily_report(self, watchlist=None, scan_universe=None):
@@ -1322,6 +1322,50 @@ _b_g.execute(o_g, 50.0)
 check("gist: PaperBroker save under runtime/_test does not PATCH the live gist",
       len(_http["patch"]) == _pre_patches)
 reset_gist_store(_GistStore(token="", runtime_dir="runtime"))
+
+# ---- 61. Discount-zone filter + trailing stop (public swing rules)
+from quant.sm_zones import classify_zone, market_mode
+from quant.playbook import build_playbook
+
+def _swing_df(end_price: float, high: float = 200.0, low: float = 100.0):
+    """Daily bars: grind low→high then close at end_price."""
+    n = 80
+    up = np.linspace(low, high, n - 5)
+    tail = np.linspace(high, end_price, 5)
+    close = np.concatenate([up, tail])
+    idx = pd.bdate_range("2024-01-01", periods=len(close))
+    return pd.DataFrame(
+        {"Open": close, "High": close * 1.01, "Low": close * 0.99,
+         "Close": close, "Volume": 1e6}, index=idx)
+
+_z_prem = classify_zone(_swing_df(198.0))
+check("zone: price at swing high is PREMIUM",
+      _z_prem["label"] == "PREMIUM" and _z_prem["in_premium"])
+_z_ote = classify_zone(_swing_df(130.0))  # 0.70 retrace of 100→200
+check("zone: 0.70 retrace sits in BUY_ZONE or DISCOUNT",
+      _z_ote["label"] in ("BUY_ZONE", "DISCOUNT") and _z_ote["in_discount"])
+_mm = market_mode(_swing_df(198.0))
+check("market_mode: returns a known regime label",
+      _mm["mode"] in ("EXPANSION", "COMPRESSION", "CAPITULATION", "UNKNOWN"))
+
+_pb_off = build_playbook(_swing_df(198.0), require_discount=False)
+_pb_on = build_playbook(_swing_df(198.0), require_discount=True)
+check("playbook: require_discount does not crash on premium bars",
+      "urgency" in _pb_on and "zone" in _pb_on)
+check("playbook: premium + filter ON is not ACTIONABLE",
+      _pb_on["urgency"] != "🟢 ACTIONABLE")
+
+_b_trail = PaperBroker(cfg, bus, state, audit, path="runtime/_test/trail_broker.json")
+o_t = Order("TRAILT", "BUY", 5, reason="test", stop=90.0); o_t.approved = True
+_b_trail.execute(o_t, 100.0)
+check("broker: BUY stamps the initial stop on the position",
+      abs(_b_trail.positions["TRAILT"]["stop"] - 90.0) < 0.01)
+check("broker: update_stop ratchets up",
+      _b_trail.update_stop("TRAILT", 95.0)
+      and abs(_b_trail.positions["TRAILT"]["stop"] - 95.0) < 0.01)
+check("broker: update_stop refuses a lower stop",
+      _b_trail.update_stop("TRAILT", 80.0) is False
+      and abs(_b_trail.positions["TRAILT"]["stop"] - 95.0) < 0.01)
 
 print("\n" + "=" * 44)
 passed = sum(1 for _, ok in results if ok)
