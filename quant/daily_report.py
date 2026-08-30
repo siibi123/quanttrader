@@ -21,6 +21,12 @@ def render_report(data: dict) -> str:
     lines += ["## P&L Attribution", ""]
     lines.append(f"Equity: ${d['equity']:,.2f} · Today: "
                 f"{d['pnl_today_$']:+,.2f} ({d['pnl_today_pct']:+.2f}%)")
+    if d.get("spy_return_pct") is not None:
+        spy = d["spy_return_pct"]
+        excess = d["pnl_today_pct"] - spy
+        lines.append(f"SPY today: {spy:+.2f}% · excess: {excess:+.2f}pp")
+    if d.get("heat_pct") is not None:
+        lines.append(f"Book heat to stops: {d['heat_pct']:.1f}% of equity")
     lines.append("")
     if d["fills_today"]:
         lines.append("| Ticker | Side | Qty | Price | Realized $ | Strategy |")
@@ -32,6 +38,18 @@ def render_report(data: dict) -> str:
     else:
         lines.append("_No fills today._")
     lines.append("")
+
+    layers = d.get("closed_layers") or []
+    if layers:
+        lines += ["## Closed Trades — three layers", ""]
+        for L in layers:
+            lines.append(f"### {L.get('ticker', '?')} · ${L.get('realized', 0):+,.2f} "
+                         f"· {L.get('grade', '')}")
+            lines.append("**A — Facts:** " + " · ".join(L.get("facts") or []))
+            if L.get("measurement"):
+                lines.append("**B — Measurement:** " + " · ".join(L["measurement"]))
+            lines.append(f"**C — Attribution:** {L.get('note', '')}")
+            lines.append("")
 
     lines += ["## Risk Limit Utilization", ""]
     if d["risk_limits"]:
@@ -64,6 +82,11 @@ def render_report(data: dict) -> str:
     lines.append("")
 
     lines += ["## Tomorrow's Candidate Orders", ""]
+    if d.get("etf_leaders"):
+        lines.append("Top-down ETF gate (today): **"
+                     + ", ".join(d["etf_leaders"]) + "**. "
+                     "Names outside those sectors are sidelined, not traded.")
+        lines.append("")
     lines.append("_Suggestions only — this platform executes within the "
                 "same decision cycle it proposes and has no pending-order "
                 "queue; shown here as what the sector/target engine (P5) "
@@ -129,6 +152,9 @@ def render_morning_briefing(data: dict) -> str:
     lines.append("")
 
     lines += ["## Today's Candidates", ""]
+    if d.get("etf_leaders"):
+        lines.append("ETF leaders: **" + ", ".join(d["etf_leaders"]) + "**.")
+        lines.append("")
     lines.append("_Suggestions only — the same sector/target scan the LAB "
                 "tab uses; nothing here executes a trade._")
     lines.append("")

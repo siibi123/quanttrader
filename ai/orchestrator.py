@@ -31,6 +31,10 @@ from quant.anomaly_library import match_anomalies
 from quant.flow_confluence import confluence
 from quant.setup_risk import book_overlap_mult, high_impact_soon
 from quant.playbook import build_playbook
+from quant.scorecard import book_heat
+from quant.sector_etf import (SECTOR_ETFS, apply_etf_gate, breadth_from_universe,
+                              rank_etfs)
+from quant.trade_layers import closed_trade_layers, pair_exits
 from quant.correlation_monitor import CORRELATION_POLICY, correlation_regime
 from quant.daily_report import render_morning_briefing, render_report
 from quant.execution_quality import slippage_report
@@ -636,13 +640,34 @@ class RuleOrchestrator:
                          "section is unavailable.")
 
         suggestions = []
+        etf_leaders: list[str] = []
         scan_symbols = scan_universe or watchlist
         if scan_symbols:
             scan = self.sector_scan(scan_symbols, account=equity)
             suggestions = scan.get("names", [])
+            etf_leaders = scan.get("etf_leaders") or []
         else:
             notes.append("No watchlist passed — tomorrow's candidate "
                         "orders section skipped this run.")
+
+        spy_ret = (self._state.get("benchmark.spy") or {}).get("ret_pct")
+        ht = book_heat(self._broker.positions, marks)
+        heat_pct = (ht["heat_$"] / equity * 100) if equity else 0.0
+        closed_layers = []
+        for sell, buy in pair_exits(self._broker.fills):
+            if (sell.get("ts") or 0) < cutoff:
+                continue
+            headline = None
+            news = self._state.get(f"news.{sell.get('ticker')}") or {}
+            heads = news.get("headlines") or news.get("headline")
+            if isinstance(heads, list) and heads:
+                headline = str(heads[0].get("headline", heads[0])
+                               if isinstance(heads[0], dict) else heads[0])
+            elif isinstance(heads, str):
+                headline = heads
+            closed_layers.append(closed_trade_layers(
+                sell, entry_fill=buy, news_headline=headline,
+                spy_ret_pct=spy_ret))
 
         data = {
             "date": today, "equity": equity, "day_start_equity": day_start,
@@ -651,6 +676,8 @@ class RuleOrchestrator:
             "signals_today": signals_today, "settled_today": settled_today,
             "settled_cumulative": settled_cumulative,
             "suggestions": suggestions, "notes": notes,
+            "spy_return_pct": spy_ret, "heat_pct": heat_pct,
+            "closed_layers": closed_layers, "etf_leaders": etf_leaders,
         }
         report_md = render_report(data)
 
@@ -691,6 +718,7 @@ class RuleOrchestrator:
 
         regimes: dict[str, str] = {}
         candidates: list = []
+        etf_leaders: list[str] = []
         notes: list[str] = []
         if watchlist:
             for s in watchlist:
@@ -699,13 +727,15 @@ class RuleOrchestrator:
         if scan_symbols:
             scan = self.sector_scan(scan_symbols, account=equity)
             candidates = scan.get("names", [])
+            etf_leaders = scan.get("etf_leaders") or []
         if not watchlist and not scan_symbols:
             notes.append("No watchlist passed — regime reads and "
                         "candidate scan skipped this run.")
 
         data = {"date": today, "equity": equity, "circuit_breaker": cb,
                "correlation_regime": corr, "regimes": regimes,
-               "candidates": candidates, "notes": notes}
+               "candidates": candidates, "notes": notes,
+               "etf_leaders": etf_leaders}
         md = render_morning_briefing(data)
 
         os.makedirs(reports_dir, exist_ok=True)
@@ -932,6 +962,34 @@ class RuleOrchestrator:
                                      flow_by_ticker=flow_by,
                                      macro_trend=macro_trend,
                                      flow_confluence_by_ticker=confluence_by)
+        etf_leaders: list[str] = []
+        try:
+            etf_syms = list(SECTOR_ETFS.values()) + ["SPY"]
+            batch = (batch_fn(etf_syms) if batch_fn else
+                     {s: self._provider.get_candles(s) for s in etf_syms})
+            spy_df = batch.get("SPY")
+            etf_data = {name: batch[etf] for name, etf in SECTOR_ETFS.items()
+                        if etf in batch and len(batch[etf]) >= 20}
+            fed = None
+            cpi = None
+            macro = self._state.get("macro") or {}
+            if isinstance(macro.get("fdtr"), dict) and macro["fdtr"].get("latest") is not None:
+                fed = float(macro["fdtr"]["latest"])
+            if isinstance(macro.get("cpi_yoy"), dict) and macro["cpi_yoy"].get("latest") is not None:
+                cpi = float(macro["cpi_yoy"]["latest"])
+            brd = breadth_from_universe(data, sectors)
+            ranked_etf = rank_etfs(etf_data, spy_df, breadth=brd,
+                                   fed_rate=fed, cpi=cpi)
+            kept, side, etf_leaders = apply_etf_gate(out.get("names") or [],
+                                                     ranked_etf, top_n=3)
+            out["names"] = kept
+            out["sidelined"] = side
+            out["etf_rank"] = ranked_etf
+            out["etf_leaders"] = etf_leaders
+        except Exception:
+            out["etf_leaders"] = []
+            out["sidelined"] = []
+            out["etf_rank"] = []
         out["n_requested"] = n_requested
         self._state.set("sector_scan", out, source="research")
         top_sec = out["sectors"][0]["sector"] if out["sectors"] else "none"

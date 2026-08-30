@@ -1470,6 +1470,48 @@ _wf_good = pd.DataFrame({"Sharpe": [0.8, 0.6, 0.5, 0.7]})
 check("desk_read: most folds green is ROBUST",
       _rob(_wf_good, {"CAGR %": 15.0, "Buy&Hold CAGR %": 10.0})["label"] == "ROBUST")
 
+from quant.trade_layers import closed_trade_layers as _ctl
+_hy = _ctl({"ticker": "AAA", "side": "SELL", "qty": 2, "price": 95,
+            "realized": -10, "reason": "EXIT NOW — stop $96 violated"},
+           entry_fill={"price": 100, "reason": "ENTER — 5/5 gates"})
+check("layers: a stop-out is HYGIENE not a model win",
+      _hy["grade"] == "HYGIENE")
+_low = _ctl({"ticker": "HOOD", "side": "SELL", "qty": 2, "price": 90,
+             "realized": -20, "reason": "EXIT"},
+            entry_fill={"price": 110, "reason": "PREMIUM of the swing — don't overpay"})
+check("layers: premium/chase loss is LOW",
+      _low["grade"] == "LOW")
+check("layers: never assigns homework instead of a fact",
+      all("check news" not in x.lower() for x in _hy["facts"]))
+
+from quant.sector_etf import (apply_etf_gate as _egate, canon_sector as _cs,
+                              macro_adj as _mac, rank_etfs as _retf)
+check("sector_etf: Yahoo aliases map to GICS",
+      _cs("Financial Services") == "Financials"
+      and _cs("Unclassified") == "Unclassified")
+check("sector_etf: no fabricated Fed/CPI tilt",
+      _mac(None, None) == {})
+_idx_e = pd.bdate_range("2024-01-01", periods=60)
+_up = pd.Series(np.linspace(100, 130, 60), index=_idx_e)
+_flat = pd.Series(np.linspace(100, 101, 60), index=_idx_e)
+_ohlc = lambda s: pd.DataFrame(
+    {"Open": s, "High": s * 1.01, "Low": s * 0.99, "Close": s, "Volume": 1e6},
+    index=_idx_e)
+_er = _retf({"Technology": _ohlc(_up), "Utilities": _ohlc(_flat)}, _ohlc(_flat))
+check("sector_etf: stronger ETF ranks above the weaker",
+      _er and _er[0]["sector"] == "Technology")
+_kept, _side, _lead = _egate(
+    [{"ticker": "A", "sector": "Technology", "target_score": 80},
+     {"ticker": "B", "sector": "Utilities", "target_score": 70},
+     {"ticker": "C", "sector": "Energy", "target_score": 60},
+     {"ticker": "D", "sector": "Financials", "target_score": 55},
+     {"ticker": "E", "sector": "Healthcare", "target_score": 50},
+     {"ticker": "F", "sector": "Unclassified", "target_score": 40}],
+    [{"sector": "Technology"}, {"sector": "Healthcare"}, {"sector": "Energy"}])
+check("sector_etf: gate keeps top sectors + unclassified, sidelines the rest",
+      {n["ticker"] for n in _kept} == {"A", "C", "E", "F"}
+      and {n["ticker"] for n in _side} == {"B", "D"})
+
 print("\n" + "=" * 44)
 passed = sum(1 for _, ok in results if ok)
 print(f"QUANTTRADER CORE: {passed}/{len(results)} PASS")

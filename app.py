@@ -950,6 +950,10 @@ with t_lab:
 
     with r2:
         st.markdown("### Alternatives")
+        scan = state.get("sector_scan") or {}
+        if scan.get("etf_leaders"):
+            st.caption("ETF gate: " + ", ".join(scan["etf_leaders"])
+                       + " — names outside this are sidelined.")
         alts = state.get("desk.alternatives") or []
         if alts:
             st.dataframe(pd.DataFrame([{
