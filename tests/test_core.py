@@ -1449,6 +1449,27 @@ _fs = _bh.execute(_os, 100.0)
 check("broker: order.slippage overrides the 5bp default",
       _fs and abs(_fs["price"] - 101.0) < 0.02)
 
+from quant.desk_read import attribution as _attr, robustness as _rob
+_comp_a = pd.DataFrame({
+    "trend": [0.8], "momentum": [0.6], "bxtrender": [0.4],
+    "macd": [0.2], "rsi": [-0.1], "meanrev": [0.0], "volume": [0.3],
+    "score": [0.4], "signal": ["BUY"],
+})
+_aa = _attr(_comp_a)
+check("desk_read: BUY with 5 models long is BROAD and trend-led",
+      _aa["crowd"] == "BROAD" and _aa["leader"] == "trend" and _aa["n_long"] >= 5)
+_wf_bad = pd.DataFrame({"Sharpe": [-0.4, 0.1, -0.2, -0.5],
+                        "CAGR %": [1, 2, 0, -1],
+                        "Buy&Hold CAGR %": [8, 8, 8, 8]})
+_rb = _rob(_wf_bad, {"CAGR %": 2.0, "Buy&Hold CAGR %": 12.0})
+check("desk_read: last-fold death is FRAGILE",
+      _rb["label"] == "FRAGILE")
+check("desk_read: strategy losing to buy-hold is called out",
+      _rb["activity"] is not None and "Activity lost" in _rb["activity"])
+_wf_good = pd.DataFrame({"Sharpe": [0.8, 0.6, 0.5, 0.7]})
+check("desk_read: most folds green is ROBUST",
+      _rob(_wf_good, {"CAGR %": 15.0, "Buy&Hold CAGR %": 10.0})["label"] == "ROBUST")
+
 print("\n" + "=" * 44)
 passed = sum(1 for _, ok in results if ok)
 print(f"QUANTTRADER CORE: {passed}/{len(results)} PASS")

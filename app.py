@@ -95,10 +95,41 @@ h3 {{ color:#f4f1ea !important; font-size:0.92rem !important;
 .stSlider label, .stSelectbox label, .stToggle label {{ color:#8b9198 !important; }}
 </style>""", unsafe_allow_html=True)
 
-PLOT = dict(paper_bgcolor="#0a0a0a", plot_bgcolor="#0a0a0a",
-            font=dict(color="#a1a1aa", family="IBM Plex Mono", size=11),
-            xaxis=dict(gridcolor="#161618", rangeslider_visible=False),
-            yaxis=dict(gridcolor="#161618", side="right"))
+PLOT = dict(paper_bgcolor="#070809", plot_bgcolor="#070809",
+            font=dict(color="#8b9198", family="IBM Plex Mono", size=11),
+            xaxis=dict(gridcolor="#161a1c", rangeslider_visible=False),
+            yaxis=dict(gridcolor="#161a1c", side="right"))
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _desk_study(ohlc: pd.DataFrame, symbol: str, tf: str):
+    """Attribution + walk-forward + vs buy-hold for the chart name only."""
+    from quant.backtest import BTConfig, run_backtest, walk_forward
+    from quant.desk_read import attribution, robustness
+    from quant.signals import composite
+    if ohlc is None or len(ohlc) < 130:
+        return None
+    att = attribution(composite(ohlc))
+    out = {"att": att, "wf": None, "eq": None, "bh": None,
+           "rob": None, "metrics": None}
+    if tf == "1h":
+        out["rob"] = robustness(pd.DataFrame(), {})
+        return out
+    try:
+        cfg = BTConfig(starting_cash=10_000)
+        bt = run_backtest(ohlc, cfg)
+        wf = (walk_forward(ohlc, cfg, n_folds=4)
+              if len(ohlc) >= 400 else pd.DataFrame())
+        out["metrics"] = bt.metrics
+        out["eq"] = bt.equity
+        out["bh"] = bt.bh_equity
+        out["wf"] = wf
+        out["rob"] = robustness(wf, bt.metrics)
+    except Exception:
+        out["rob"] = {"label": "N/A",
+                      "line": "Study failed on this series.",
+                      "activity": None, "n_pos": 0, "n": 0}
+    return out
 
 
 @st.cache_resource
@@ -648,9 +679,67 @@ with t_chart:
                         f"{opt.get('median_iv','—')} · max-γ strike "
                         f"{opt.get('max_gamma_strike','—')}")
         if line:
-            st.markdown(f"<div class='qt-panel'>🎯 <b>{chart_sym}</b> · "
+            st.markdown(f"<div class='qt-panel'><b>{chart_sym}</b> · "
                         + " &nbsp;|&nbsp; ".join(line) + "</div>",
                         unsafe_allow_html=True)
+
+        study = _desk_study(df, chart_sym, tf)
+        if study and study.get("att"):
+            att, rob = study["att"], study.get("rob") or {}
+            crowd_col = {"BROAD": ACCENT, "NARROW": "#e3b341",
+                         "COUNTERTREND": "#f07167", "MIXED": "#8b9198"}.get(
+                att["crowd"], "#8b9198")
+            rob_col = {"ROBUST": ACCENT, "FRAGILE": "#f07167",
+                       "UNSTABLE": "#e3b341", "N/A": "#8b9198"}.get(
+                rob.get("label"), "#8b9198")
+            st.markdown(
+                f"<div class='qt-panel'><span class='qt-kicker'>"
+                f"Name study · {chart_sym}</span><br>"
+                f"<b style='color:{crowd_col}'>{att['line']}</b><br>"
+                f"<b style='color:{rob_col}'>{rob.get('label','N/A')}</b> — "
+                f"{rob.get('line','')}"
+                + (f"<br>{rob['activity']}" if rob.get("activity") else "")
+                + "</div>",
+                unsafe_allow_html=True)
+            c_att, c_eq = st.columns((1, 1))
+            with c_att:
+                rows = att["rows"]
+                fig_a = go.Figure(go.Bar(
+                    y=[r["model"] for r in rows][::-1],
+                    x=[r["contrib"] for r in rows][::-1],
+                    orientation="h",
+                    marker_color=[ACCENT if r["contrib"] >= 0 else "#f07167"
+                                  for r in rows][::-1],
+                    name="contrib"))
+                fig_a.update_layout(
+                    height=240, margin=dict(l=8, r=8, t=8, b=8),
+                    showlegend=False, **PLOT)
+                fig_a.update_xaxes(title="weighted contribution")
+                st.plotly_chart(fig_a, use_container_width=True)
+            with c_eq:
+                if study.get("eq") is not None and study.get("bh") is not None:
+                    fig_e = go.Figure()
+                    fig_e.add_trace(go.Scatter(
+                        x=study["eq"].index, y=study["eq"].values,
+                        name="Strategy", line=dict(color=ACCENT, width=1.6)))
+                    fig_e.add_trace(go.Scatter(
+                        x=study["bh"].index, y=study["bh"].values,
+                        name="Buy & hold",
+                        line=dict(color="#8b9198", width=1.2, dash="dot")))
+                    fig_e.update_layout(
+                        height=240, margin=dict(l=8, r=8, t=8, b=8),
+                        legend=dict(orientation="h", y=1.12), **PLOT)
+                    st.plotly_chart(fig_e, use_container_width=True)
+                else:
+                    st.caption("Walk-forward skipped on 1h (too heavy). Switch to 1d.")
+            wf = study.get("wf")
+            if wf is not None and len(wf):
+                show = [c for c in ("fold", "start", "end", "Sharpe",
+                                    "CAGR %", "Buy&Hold CAGR %", "Trades")
+                        if c in wf.columns]
+                st.caption("Walk-forward folds — last fold is the one that matters.")
+                st.dataframe(wf[show], use_container_width=True, hide_index=True)
+
         st.caption(f"Last updated {time.strftime('%H:%M:%S')}")
     else:
         st.info(f"No data for {chart_sym} — throttled or bad symbol.")
