@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 from ai.orchestrator import RuleOrchestrator, TOOL_SCHEMAS
 from core.engine import AuditLog, PaperBroker, RiskEngine
@@ -39,61 +40,163 @@ st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 html, body, .stApp, [data-testid="stAppViewContainer"] {{
-  background:#070809 !important; color:#c9cdd1;
+  background:#080a0b !important; color:#cfd3d6;
   font-family:'IBM Plex Sans',sans-serif;
 }}
-header[data-testid="stHeader"] {{ background:transparent; }}
-#MainMenu, footer, [data-testid="stToolbar"], [data-testid="stDecoration"] {{
-  visibility:hidden; height:0;
+header[data-testid="stHeader"] {{
+  background: transparent !important;
+  height: 3.5rem !important;
 }}
-.block-container {{ padding-top:0.55rem; max-width:1440px !important; padding-bottom:2.5rem; }}
-.qt-nav {{ display:flex; align-items:baseline; gap:18px; padding:4px 2px 12px;
-  border-bottom:1px solid rgba(255,255,255,0.06); margin-bottom:4px; }}
-.qt-logo {{ font-weight:700; font-size:1.05rem; color:#f4f1ea; letter-spacing:-0.03em; }}
+#MainMenu, footer, [data-testid="stDecoration"],
+[data-testid="stToolbar"] {{ visibility:hidden; }}
+div[data-testid="stStatusWidget"], .stDeployButton {{ display:none !important; }}
+
+[data-testid="collapsedControl"],
+[data-testid="stSidebarCollapsedControl"],
+[data-testid="stExpandSidebarButton"] {{
+  visibility: visible !important;
+  display: flex !important;
+  opacity: 1 !important;
+  position: fixed !important;
+  left: 14px !important;
+  top: 14px !important;
+  z-index: 2147483647 !important;
+  background: {ACCENT} !important;
+  border: 0 !important;
+  border-radius: 8px !important;
+  padding: 8px !important;
+  width: 40px !important;
+  height: 40px !important;
+  box-shadow: 0 8px 28px rgba(0,0,0,.5), 0 0 0 3px rgba(34,197,94,.25) !important;
+}}
+[data-testid="collapsedControl"] svg,
+[data-testid="stSidebarCollapsedControl"] svg,
+[data-testid="stExpandSidebarButton"] svg {{
+  fill: #06210f !important;
+  color: #06210f !important;
+  width: 22px !important;
+  height: 22px !important;
+}}
+
+.block-container {{
+  padding-top: 3.4rem; max-width: 1480px !important; padding-bottom: 3rem;
+}}
+.qt-nav {{ display:flex; align-items:baseline; gap:16px; padding:2px 2px 14px;
+  border-bottom:1px solid rgba(255,255,255,0.06); margin-bottom:6px; }}
+.qt-logo {{ font-weight:700; font-size:1.08rem; color:#f4f1ea; letter-spacing:-0.03em; }}
 .qt-logo span {{ color:{ACCENT}; }}
 .qt-sub {{ font-size:.62rem; letter-spacing:0.22em; color:#6b7178; font-weight:500; }}
-.qt-link {{ font-size:.78rem; color:#8b9198; }}
-.qt-strip {{ display:flex; border:1px solid rgba(255,255,255,0.07);
-  margin:8px 0 16px; background:#0c0e10; border-radius:2px; }}
-.qt-stat {{ flex:1; text-align:left; padding:12px 14px;
+.qt-link {{ font-size:.76rem; color:#8b9198; }}
+.qt-strip {{ display:flex; border:1px solid rgba(255,255,255,0.08);
+  margin:8px 0 18px; background:linear-gradient(180deg,#101315,#0c0e10);
+  border-radius:8px; overflow:hidden; }}
+.qt-stat {{ flex:1; text-align:left; padding:14px 16px;
   border-right:1px solid rgba(255,255,255,0.06); }}
 .qt-stat:last-child {{ border-right:0; }}
 .qt-stat .v {{ font-family:'IBM Plex Mono',monospace; font-weight:500;
-  font-size:1.05rem; color:#f4f1ea; letter-spacing:-0.02em; }}
+  font-size:1.08rem; color:#f4f1ea; letter-spacing:-0.02em; }}
 .qt-stat .v.g {{ color:{ACCENT}; }} .qt-stat .v.r {{ color:#f07167; }}
 .qt-stat .k {{ font-size:.58rem; letter-spacing:0.16em; color:#6b7178;
-  margin-top:4px; font-weight:500; }}
-section[data-testid="stSidebar"] {{ background:#0c0e10 !important;
-  border-right:1px solid rgba(255,255,255,0.06); }}
+  margin-top:5px; font-weight:500; }}
+section[data-testid="stSidebar"] {{
+  background:#0b0d0f !important;
+  border-right:1px solid rgba(255,255,255,0.07);
+}}
+section[data-testid="stSidebar"] > div {{ padding-top: 0.4rem; }}
 section[data-testid="stSidebar"] .stExpander {{
-  border:1px solid rgba(255,255,255,0.07); border-radius:2px;
-  background:#0a0c0e; margin-bottom:8px; }}
+  border:1px solid rgba(255,255,255,0.08); border-radius:8px;
+  background:#101315; margin-bottom:10px; }}
 section[data-testid="stSidebar"] summary {{ font-size:.68rem !important;
   letter-spacing:0.16em; text-transform:uppercase; color:#e8e6df !important; }}
-.stButton>button {{ border-radius:2px; border:1px solid rgba(255,255,255,0.1);
-  background:#12151a; color:#d5d0c7; font-weight:500; }}
+.stButton>button {{ border-radius:8px; border:1px solid rgba(255,255,255,0.12);
+  background:#14181c; color:#d5d0c7; font-weight:500; }}
+.stButton>button:hover {{ border-color:{ACCENT}; color:#fff; }}
 .stButton>button[kind="primary"] {{ background:{ACCENT}; color:#06210f;
   border:0; font-weight:700; letter-spacing:0.08em; }}
-.qt-panel {{ border:1px solid rgba(255,255,255,0.07); border-radius:2px;
-  background:#0c0e10; padding:14px 16px; margin-bottom:10px; }}
+.qt-panel {{ border:1px solid rgba(255,255,255,0.08); border-radius:8px;
+  background:#101315; padding:14px 16px; margin-bottom:10px; }}
 .qt-kicker {{ font-size:.62rem; letter-spacing:0.18em; color:#6b7178;
   text-transform:uppercase; margin-bottom:6px; font-weight:600; }}
 div[data-testid="stDataFrame"] {{ font-family:'IBM Plex Mono',monospace; font-size:.8rem; }}
-div[data-testid="stMetric"] {{ background:#0c0e10; border:1px solid rgba(255,255,255,0.07);
-  border-radius:2px; padding:8px 12px; }}
+div[data-testid="stMetric"] {{ background:#101315; border:1px solid rgba(255,255,255,0.08);
+  border-radius:8px; padding:8px 12px; }}
 .qt-audit {{ border-left:2px solid {ACCENT}; padding:8px 12px; margin:5px 0;
-  background:#0c0e10; font-family:'IBM Plex Mono',monospace; font-size:.76rem; }}
+  background:#101315; font-family:'IBM Plex Mono',monospace; font-size:.76rem;
+  border-radius:0 8px 8px 0; }}
 .qt-audit.veto {{ border-left-color:#f07167; }}
 .qt-audit .who {{ color:{ACCENT}; font-weight:600; }}
 .qt-audit.veto .who {{ color:#f07167; }}
 .qt-audit .t {{ color:#5c6370; float:right; }}
 h3 {{ color:#f4f1ea !important; font-size:0.92rem !important;
   letter-spacing:0.04em; font-weight:600 !important; }}
+.stTabs [data-baseweb="tab-list"] {{
+  gap: 4px; border-bottom: 1px solid rgba(255,255,255,0.06); }}
 .stTabs [data-baseweb="tab"] {{ font-size:.72rem; letter-spacing:0.14em;
-  text-transform:uppercase; }}
-.stTabs [aria-selected="true"] {{ color:{ACCENT} !important; }}
-.stSlider label, .stSelectbox label, .stToggle label {{ color:#8b9198 !important; }}
+  text-transform:uppercase; background:transparent; }}
+.stTabs [aria-selected="true"] {{
+  color:{ACCENT} !important;
+  border-bottom: 2px solid {ACCENT} !important;
+}}
+.stSlider label, .stSelectbox label, .stToggle label, .stTextInput label,
+.stNumberInput label {{ color:#8b9198 !important; }}
+div[data-testid="stSidebarCollapseButton"] {{
+  visibility: visible !important;
+}}
 </style>""", unsafe_allow_html=True)
+
+components.html(
+    """
+<script>
+(function () {
+  const d = window.parent.document;
+  if (d.getElementById("qt-open-desk")) return;
+  const b = d.createElement("button");
+  b.id = "qt-open-desk";
+  b.type = "button";
+  b.textContent = "Open desk";
+  b.setAttribute("aria-label", "Open desk panel");
+  Object.assign(b.style, {
+    position: "fixed",
+    left: "16px",
+    top: "16px",
+    zIndex: "2147483647",
+    display: "none",
+    background: "#22c55e",
+    color: "#06210f",
+    border: "0",
+    borderRadius: "8px",
+    padding: "10px 14px",
+    font: "700 12px/1 IBM Plex Sans, system-ui, sans-serif",
+    letterSpacing: "0.12em",
+    textTransform: "uppercase",
+    cursor: "pointer",
+    boxShadow: "0 8px 24px rgba(0,0,0,.45)",
+  });
+  function target() {
+    return (
+      d.querySelector('[data-testid="collapsedControl"]') ||
+      d.querySelector('[data-testid="stExpandSidebarButton"]') ||
+      d.querySelector('[data-testid="stSidebarCollapsedControl"] button') ||
+      d.querySelector('[data-testid="stSidebarCollapsedControl"]') ||
+      d.querySelector('button[aria-label="Open sidebar"]') ||
+      d.querySelector('button[aria-label*="sidebar" i]')
+    );
+  }
+  b.onclick = function () {
+    const el = target();
+    if (el) el.click();
+  };
+  d.body.appendChild(b);
+  setInterval(function () {
+    const side = d.querySelector('section[data-testid="stSidebar"]');
+    const w = side ? side.getBoundingClientRect().width : 0;
+    b.style.display = w < 80 ? "block" : "none";
+  }, 250);
+})();
+</script>
+    """,
+    height=0,
+)
 
 PLOT = dict(paper_bgcolor="#070809", plot_bgcolor="#070809",
             font=dict(color="#8b9198", family="IBM Plex Mono", size=11),
