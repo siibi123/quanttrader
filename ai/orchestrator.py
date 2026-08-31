@@ -335,13 +335,17 @@ class RuleOrchestrator:
         entries, stacking with the P7c/P7e gates rather than replacing
         them."""
         pos = self._broker.positions
-        if len(pos) < 2:
+        if not isinstance(pos, dict) or len(pos) < 2:
             return {"policy": CORRELATION_POLICY["normal"]}
         rets = {}
-        for t in pos:
-            df = self._provider.get_candles(t)
-            if len(df) >= 60:
-                rets[t] = df["Close"].pct_change().dropna()
+        for t in list(pos):
+            try:
+                df = self._provider.get_candles(str(t))
+                if df is None or len(df) < 60 or "Close" not in getattr(df, "columns", []):
+                    continue
+                rets[str(t)] = df["Close"].pct_change().dropna()
+            except Exception:
+                continue
         if len(rets) < 2:
             return {"policy": CORRELATION_POLICY["normal"]}
         out = correlation_regime(rets)
@@ -1122,8 +1126,11 @@ class RuleOrchestrator:
             if eq_now > 0:
                 cb = self._circuit_breaker.update(eq_now)
 
-        corr_pol = self.correlation_monitor().get(
-            "policy", CORRELATION_POLICY["normal"])
+        try:
+            corr_pol = self.correlation_monitor().get(
+                "policy", CORRELATION_POLICY["normal"])
+        except Exception:
+            corr_pol = CORRELATION_POLICY["normal"]
         stress_budget = (self._state.get("portfolio_stress.risk_budget")
                         or {"size_multiplier": 1.0, "elevated_risk": False})
 

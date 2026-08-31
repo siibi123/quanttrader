@@ -254,8 +254,10 @@ class PaperBroker:
                 self.cash = d["cash"]
                 self.start_equity = d["start_equity"]
                 self.day_start_equity = d.get("day_start_equity", self.cash)
-                self.positions = d["positions"]
-                self.fills = d["fills"]
+                raw_pos = d.get("positions") or {}
+                self.positions = raw_pos if isinstance(raw_pos, dict) else {}
+                raw_fills = d.get("fills") or []
+                self.fills = raw_fills if isinstance(raw_fills, list) else []
             except Exception:
                 pass
 
