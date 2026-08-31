@@ -35,15 +35,6 @@ ACCENT = "#22c55e"
 # The sidebar's "Chart symbol" input ONLY controls what the CHART tab
 # displays; it plays no role in what gets scanned or traded.
 DEFAULT_CHART_SYMBOL = "AAPL"
-if "desk_open" not in st.session_state:
-    st.session_state.desk_open = True
-
-def _close_desk():
-    st.session_state.desk_open = False
-
-def _open_desk():
-    st.session_state.desk_open = True
-
 st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
@@ -54,18 +45,37 @@ html, body, .stApp, [data-testid="stAppViewContainer"] {{
 header[data-testid="stHeader"] {{
   background: transparent !important;
 }}
-#MainMenu, footer, [data-testid="stDecoration"],
-[data-testid="stToolbar"] {{ visibility:hidden; }}
+#MainMenu, footer, [data-testid="stDecoration"] {{ visibility:hidden; }}
 div[data-testid="stStatusWidget"], .stDeployButton {{ display:none !important; }}
 
-/* Never use Streamlit's own chevron — we own Open/Close. */
+/* Native open/close MUST stay visible — hiding it trapped the owner
+   with no rail and no button. Style the collapsed chip so it is obvious. */
 [data-testid="collapsedControl"],
 [data-testid="stSidebarCollapsedControl"],
-[data-testid="stExpandSidebarButton"],
-[data-testid="stSidebarCollapseButton"],
-section[data-testid="stSidebar"] [data-testid="stBaseButton-header"],
-section[data-testid="stSidebar"] button[kind="header"] {{
-  display: none !important;
+[data-testid="stExpandSidebarButton"] {{
+  visibility: visible !important;
+  display: flex !important;
+  opacity: 1 !important;
+  position: fixed !important;
+  left: 12px !important;
+  top: 12px !important;
+  z-index: 2147483647 !important;
+  background: {ACCENT} !important;
+  width: 44px !important;
+  height: 44px !important;
+  border-radius: 8px !important;
+  padding: 8px !important;
+  box-shadow: 0 8px 24px rgba(0,0,0,.45) !important;
+}}
+[data-testid="collapsedControl"] svg,
+[data-testid="stSidebarCollapsedControl"] svg,
+[data-testid="stExpandSidebarButton"] svg {{
+  fill: #06210f !important;
+  color: #06210f !important;
+}}
+[data-testid="stSidebarCollapseButton"] {{
+  visibility: visible !important;
+  display: flex !important;
 }}
 
 .block-container {{
@@ -268,17 +278,10 @@ def render_cycle_countdown():
               f"next cycle in {m}m {s}s")
 
 # ---------------------------------------------------------------------------
-# LEFT RAIL
-# When the desk is closed we do NOT render st.sidebar at all. Streamlit
-# then has nothing to show on the left — no CSS fight, no hidden chevron.
-# Widget values live in session_state keys so they survive the hide.
+# LEFT RAIL — always rendered. Open/close is Streamlit's own chevron
+# (top-left when collapsed, on the rail when open). Do not unmount this.
 # ---------------------------------------------------------------------------
-if st.session_state.desk_open:
-  with st.sidebar:
-    _cr, _ = st.columns([1, 1])
-    with _cr:
-        st.button("Close desk", type="primary", key="qt_close_desk",
-                  on_click=_close_desk, use_container_width=True)
+with st.sidebar:
     st.markdown("<div class='qt-logo'>◆ Quant<span>Trader</span></div>"
                 "<div class='qt-sub'>AUTONOMOUS PAPER DESK</div>",
                 unsafe_allow_html=True)
@@ -518,25 +521,6 @@ if st.session_state.desk_open:
     if scan_prog:
         st.caption(f"Scanned {scan_prog['scanned']}/{scan_prog['total']} "
                   f"symbols this cycle")
-else:
-    chart_sym = (st.session_state.get("ui_chart_sym")
-                 or DEFAULT_CHART_SYMBOL).strip().upper()
-    tf = st.session_state.get("ui_tf", "1d")
-    rp = float(st.session_state.get("desk_risk_cap", 1.0))
-    discount_zone = bool(st.session_state.get("discount_zone", True))
-    deep = bool(cfg.lse_api_key)
-    news_pass = bool(cfg.news_api_key)
-    macro_pass = bool(cfg.lse_api_key)
-    aum_in = float(st.session_state.get("aum_in", cfg.aum or cfg.starting_cash))
-    mode_val = st.session_state.get("mode_val", cfg.max_position_mode or "pct")
-    pct_cap_in = float(st.session_state.get("pct_cap_in", cfg.max_position_pct))
-    fixed_cap_in = float(st.session_state.get("fixed_cap_in",
-                         cfg.max_position_fixed_usd or 1000.0))
-    bypass_gate = bool(st.session_state.get("p7a_bypass", True))
-    run = False
-    state.set("ui.chart_symbol", chart_sym, source="ui")
-    if "feed_auto_started" not in st.session_state:
-        st.session_state.feed_auto_started = _autostart_feed(feed)
 
 E["risk"].cfg = dataclasses.replace(
     cfg, aum=aum_in, max_position_mode=mode_val,
@@ -620,11 +604,6 @@ def render_open_book():
 # ---------------------------------------------------------------------------
 # NAV + LSE-style STATS STRIP: TRADES · WIN% · PF · P&L · DD · SR
 # ---------------------------------------------------------------------------
-if not st.session_state.desk_open:
-    _oc, _ = st.columns([1, 5])
-    with _oc:
-        st.button("Open desk", type="primary", use_container_width=True,
-                  key="qt_open_desk", on_click=_open_desk)
 nav_l, nav_r = st.columns([4, 1])
 with nav_l:
     st.markdown("""
