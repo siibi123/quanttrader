@@ -51,31 +51,14 @@ header[data-testid="stHeader"] {{
 [data-testid="stToolbar"] {{ visibility:hidden; }}
 div[data-testid="stStatusWidget"], .stDeployButton {{ display:none !important; }}
 
+/* Native Streamlit reopen control stays clickable but invisible —
+   we draw ONE "Open desk" chip on top of it. Two green buttons was a bug. */
 [data-testid="collapsedControl"],
 [data-testid="stSidebarCollapsedControl"],
-[data-testid="stExpandSidebarButton"] {{
-  visibility: visible !important;
-  display: flex !important;
-  opacity: 1 !important;
-  position: fixed !important;
-  left: 14px !important;
-  top: 14px !important;
-  z-index: 2147483647 !important;
-  background: {ACCENT} !important;
-  border: 0 !important;
-  border-radius: 8px !important;
-  padding: 8px !important;
-  width: 40px !important;
-  height: 40px !important;
-  box-shadow: 0 8px 28px rgba(0,0,0,.5), 0 0 0 3px rgba(34,197,94,.25) !important;
-}}
-[data-testid="collapsedControl"] svg,
-[data-testid="stSidebarCollapsedControl"] svg,
-[data-testid="stExpandSidebarButton"] svg {{
-  fill: #06210f !important;
-  color: #06210f !important;
-  width: 22px !important;
-  height: 22px !important;
+[data-testid="stExpandSidebarButton"],
+div[data-testid="stSidebarCollapseButton"] {{
+  opacity: 0 !important;
+  pointer-events: none !important;
 }}
 
 .block-container {{
@@ -139,9 +122,6 @@ h3 {{ color:#f4f1ea !important; font-size:0.92rem !important;
 }}
 .stSlider label, .stSelectbox label, .stToggle label, .stTextInput label,
 .stNumberInput label {{ color:#8b9198 !important; }}
-div[data-testid="stSidebarCollapseButton"] {{
-  visibility: visible !important;
-}}
 </style>""", unsafe_allow_html=True)
 
 components.html(
@@ -535,16 +515,26 @@ with st.sidebar:
             st.caption("⚫ not running")
         st.caption("Decision cycle every 5min (market open only) · "
                    "morning briefing 9:25 ET · daily report 16:05 ET")
+        run_manual = st.button("Force cycle now", use_container_width=True,
+                               help="Only if Cloud slept or you want a "
+                                    "scan immediately. Not required.")
     st.write("")
-    # P9: the scheduler is the primary path now (fires every 5min during
-    # market hours, see SCHEDULER expander above) -- this button is a
-    # manual override for testing/impatience, no longer required for
-    # normal operation, so it's de-emphasized (no more `type="primary"`).
-    run = st.button("⚡ Force cycle now", use_container_width=True,
-                    help="Manual override — the scheduler already runs "
-                         "this automatically every 5 minutes during "
-                         "market hours.")
     render_cycle_countdown()
+
+    # Wake cycle: when the app process comes back (Cloud sleep, first
+    # open) and the market is open and the last scan is stale, run once
+    # without a button. Scheduler keeps going after that.
+    last_scan = state.get("decision_cycle.last_scan") or {}
+    last_ts = float(last_scan.get("ts") or 0)
+    stale = (time.time() - last_ts) > 300
+    session_open = market_status().get("session") == "open"
+    if "wake_cycle_done" not in st.session_state:
+        st.session_state.wake_cycle_done = False
+    auto_wake = (session_open and stale
+                 and not st.session_state.wake_cycle_done)
+    if auto_wake:
+        st.session_state.wake_cycle_done = True
+    run = bool(run_manual or auto_wake)
 
     # BUG FIX 3 + auto-feed: start once on app load, no button press
     # needed. _autostart_feed is st.cache_resource (process-wide, runs
