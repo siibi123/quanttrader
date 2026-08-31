@@ -9,7 +9,6 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-import streamlit.components.v1 as components
 
 from ai.orchestrator import RuleOrchestrator, TOOL_SCHEMAS
 from core.engine import AuditLog, PaperBroker, RiskEngine
@@ -36,6 +35,21 @@ ACCENT = "#22c55e"
 # The sidebar's "Chart symbol" input ONLY controls what the CHART tab
 # displays; it plays no role in what gets scanned or traded.
 DEFAULT_CHART_SYMBOL = "AAPL"
+if "desk_open" not in st.session_state:
+    st.session_state.desk_open = True
+_HIDE_SIDE = "" if st.session_state.desk_open else """
+section[data-testid="stSidebar"] {{
+  display: none !important;
+  width: 0 !important;
+  min-width: 0 !important;
+  transform: none !important;
+}}
+div[data-testid="stAppViewContainer"] .main,
+[data-testid="stMain"] {{
+  margin-left: 0 !important;
+}}
+.block-container {{ padding-top: 1.1rem !important; }}
+"""
 st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
@@ -45,26 +59,24 @@ html, body, .stApp, [data-testid="stAppViewContainer"] {{
 }}
 header[data-testid="stHeader"] {{
   background: transparent !important;
-  height: 3.5rem !important;
 }}
 #MainMenu, footer, [data-testid="stDecoration"],
 [data-testid="stToolbar"] {{ visibility:hidden; }}
 div[data-testid="stStatusWidget"], .stDeployButton {{ display:none !important; }}
 
-/* Native collapse/expand is clickable via JS but never drawn —
-   one custom chip is the only control the owner sees. */
+/* Never use Streamlit's own chevron — we own Open/Close. */
 [data-testid="collapsedControl"],
 [data-testid="stSidebarCollapsedControl"],
 [data-testid="stExpandSidebarButton"],
 [data-testid="stSidebarCollapseButton"],
 section[data-testid="stSidebar"] [data-testid="stBaseButton-header"],
 section[data-testid="stSidebar"] button[kind="header"] {{
-  opacity: 0 !important;
-  pointer-events: none !important;
+  display: none !important;
 }}
+{_HIDE_SIDE}
 
 .block-container {{
-  padding-top: 3.4rem; max-width: 1480px !important; padding-bottom: 3rem;
+  padding-top: 1.1rem; max-width: 1480px !important; padding-bottom: 3rem;
 }}
 .qt-nav {{ display:flex; align-items:baseline; gap:16px; padding:2px 2px 14px;
   border-bottom:1px solid rgba(255,255,255,0.06); margin-bottom:6px; }}
@@ -97,7 +109,7 @@ section[data-testid="stSidebar"] summary {{ font-size:.68rem !important;
   background:#14181c; color:#d5d0c7; font-weight:500; }}
 .stButton>button:hover {{ border-color:{ACCENT}; color:#fff; }}
 .stButton>button[kind="primary"] {{ background:{ACCENT}; color:#06210f;
-  border:0; font-weight:700; letter-spacing:0.08em; }}
+  border:0; font-weight:700; letter-spacing:0.12em; text-transform:uppercase; }}
 .qt-panel {{ border:1px solid rgba(255,255,255,0.08); border-radius:8px;
   background:#101315; padding:14px 16px; margin-bottom:10px; }}
 .qt-kicker {{ font-size:.62rem; letter-spacing:0.18em; color:#6b7178;
@@ -125,82 +137,6 @@ h3 {{ color:#f4f1ea !important; font-size:0.92rem !important;
 .stSlider label, .stSelectbox label, .stToggle label, .stTextInput label,
 .stNumberInput label {{ color:#8b9198 !important; }}
 </style>""", unsafe_allow_html=True)
-
-components.html(
-    """
-<script>
-(function () {
-  const d = window.parent.document;
-  let b = d.getElementById("qt-open-desk");
-  if (!b) {
-    b = d.createElement("button");
-    b.id = "qt-open-desk";
-    b.type = "button";
-    Object.assign(b.style, {
-      position: "fixed",
-      left: "16px",
-      top: "16px",
-      zIndex: "2147483647",
-      display: "block",
-      background: "#22c55e",
-      color: "#06210f",
-      border: "0",
-      borderRadius: "8px",
-      padding: "10px 14px",
-      minWidth: "118px",
-      font: "700 12px/1 IBM Plex Sans, system-ui, sans-serif",
-      letterSpacing: "0.12em",
-      textTransform: "uppercase",
-      cursor: "pointer",
-      boxShadow: "0 8px 24px rgba(0,0,0,.45)",
-    });
-    d.body.appendChild(b);
-  }
-  function sidebarOpen() {
-    const side = d.querySelector('section[data-testid="stSidebar"]');
-    if (!side) return false;
-    const r = side.getBoundingClientRect();
-    return r.width >= 80 && r.left > -40;
-  }
-  function target() {
-    return (
-      d.querySelector('[data-testid="stSidebarCollapseButton"]') ||
-      d.querySelector('[data-testid="collapsedControl"]') ||
-      d.querySelector('[data-testid="stExpandSidebarButton"]') ||
-      d.querySelector('[data-testid="stSidebarCollapsedControl"] button') ||
-      d.querySelector('[data-testid="stSidebarCollapsedControl"]') ||
-      d.querySelector('button[aria-label="Close sidebar"]') ||
-      d.querySelector('button[aria-label="Open sidebar"]') ||
-      d.querySelector('button[aria-label*="sidebar" i]')
-    );
-  }
-  function sync() {
-    const open = sidebarOpen();
-    b.textContent = open ? "Close desk" : "Open desk";
-    b.setAttribute("aria-label", open ? "Close desk panel" : "Open desk panel");
-    b.style.display = "block";
-    const side = d.querySelector('section[data-testid="stSidebar"]');
-    if (open && side) {
-      const r = side.getBoundingClientRect();
-      b.style.left = Math.max(16, r.right - 130) + "px";
-      b.style.top = "16px";
-    } else {
-      b.style.left = "16px";
-      b.style.top = "16px";
-    }
-  }
-  b.onclick = function () {
-    const el = target();
-    if (el) el.click();
-    setTimeout(sync, 80);
-  };
-  setInterval(sync, 250);
-  sync();
-})();
-</script>
-    """,
-    height=0,
-)
 
 PLOT = dict(paper_bgcolor="#070809", plot_bgcolor="#070809",
             font=dict(color="#8b9198", family="IBM Plex Mono", size=11),
@@ -342,6 +278,10 @@ def render_cycle_countdown():
 # LEFT RAIL
 # ---------------------------------------------------------------------------
 with st.sidebar:
+    if st.button("Close desk", type="primary", use_container_width=True,
+                 key="qt_close_desk"):
+        st.session_state.desk_open = False
+        st.rerun()
     st.markdown("<div class='qt-logo'>◆ Quant<span>Trader</span></div>"
                 "<div class='qt-sub'>AUTONOMOUS PAPER DESK</div>",
                 unsafe_allow_html=True)
@@ -662,6 +602,13 @@ def render_open_book():
 # ---------------------------------------------------------------------------
 # NAV + LSE-style STATS STRIP: TRADES · WIN% · PF · P&L · DD · SR
 # ---------------------------------------------------------------------------
+if not st.session_state.desk_open:
+    _oc, _ = st.columns([1, 5])
+    with _oc:
+        if st.button("Open desk", type="primary", use_container_width=True,
+                     key="qt_open_desk"):
+            st.session_state.desk_open = True
+            st.rerun()
 nav_l, nav_r = st.columns([4, 1])
 with nav_l:
     st.markdown("""
