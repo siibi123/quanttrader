@@ -51,12 +51,14 @@ header[data-testid="stHeader"] {{
 [data-testid="stToolbar"] {{ visibility:hidden; }}
 div[data-testid="stStatusWidget"], .stDeployButton {{ display:none !important; }}
 
-/* Native Streamlit reopen control stays clickable but invisible —
-   we draw ONE "Open desk" chip on top of it. Two green buttons was a bug. */
+/* Native collapse/expand is clickable via JS but never drawn —
+   one custom chip is the only control the owner sees. */
 [data-testid="collapsedControl"],
 [data-testid="stSidebarCollapsedControl"],
 [data-testid="stExpandSidebarButton"],
-div[data-testid="stSidebarCollapseButton"] {{
+[data-testid="stSidebarCollapseButton"],
+section[data-testid="stSidebar"] [data-testid="stBaseButton-header"],
+section[data-testid="stSidebar"] button[kind="header"] {{
   opacity: 0 !important;
   pointer-events: none !important;
 }}
@@ -129,49 +131,71 @@ components.html(
 <script>
 (function () {
   const d = window.parent.document;
-  if (d.getElementById("qt-open-desk")) return;
-  const b = d.createElement("button");
-  b.id = "qt-open-desk";
-  b.type = "button";
-  b.textContent = "Open desk";
-  b.setAttribute("aria-label", "Open desk panel");
-  Object.assign(b.style, {
-    position: "fixed",
-    left: "16px",
-    top: "16px",
-    zIndex: "2147483647",
-    display: "none",
-    background: "#22c55e",
-    color: "#06210f",
-    border: "0",
-    borderRadius: "8px",
-    padding: "10px 14px",
-    font: "700 12px/1 IBM Plex Sans, system-ui, sans-serif",
-    letterSpacing: "0.12em",
-    textTransform: "uppercase",
-    cursor: "pointer",
-    boxShadow: "0 8px 24px rgba(0,0,0,.45)",
-  });
+  let b = d.getElementById("qt-open-desk");
+  if (!b) {
+    b = d.createElement("button");
+    b.id = "qt-open-desk";
+    b.type = "button";
+    Object.assign(b.style, {
+      position: "fixed",
+      left: "16px",
+      top: "16px",
+      zIndex: "2147483647",
+      display: "block",
+      background: "#22c55e",
+      color: "#06210f",
+      border: "0",
+      borderRadius: "8px",
+      padding: "10px 14px",
+      minWidth: "118px",
+      font: "700 12px/1 IBM Plex Sans, system-ui, sans-serif",
+      letterSpacing: "0.12em",
+      textTransform: "uppercase",
+      cursor: "pointer",
+      boxShadow: "0 8px 24px rgba(0,0,0,.45)",
+    });
+    d.body.appendChild(b);
+  }
+  function sidebarOpen() {
+    const side = d.querySelector('section[data-testid="stSidebar"]');
+    if (!side) return false;
+    const r = side.getBoundingClientRect();
+    return r.width >= 80 && r.left > -40;
+  }
   function target() {
     return (
+      d.querySelector('[data-testid="stSidebarCollapseButton"]') ||
       d.querySelector('[data-testid="collapsedControl"]') ||
       d.querySelector('[data-testid="stExpandSidebarButton"]') ||
       d.querySelector('[data-testid="stSidebarCollapsedControl"] button') ||
       d.querySelector('[data-testid="stSidebarCollapsedControl"]') ||
+      d.querySelector('button[aria-label="Close sidebar"]') ||
       d.querySelector('button[aria-label="Open sidebar"]') ||
       d.querySelector('button[aria-label*="sidebar" i]')
     );
   }
+  function sync() {
+    const open = sidebarOpen();
+    b.textContent = open ? "Close desk" : "Open desk";
+    b.setAttribute("aria-label", open ? "Close desk panel" : "Open desk panel");
+    b.style.display = "block";
+    const side = d.querySelector('section[data-testid="stSidebar"]');
+    if (open && side) {
+      const r = side.getBoundingClientRect();
+      b.style.left = Math.max(16, r.right - 130) + "px";
+      b.style.top = "16px";
+    } else {
+      b.style.left = "16px";
+      b.style.top = "16px";
+    }
+  }
   b.onclick = function () {
     const el = target();
     if (el) el.click();
+    setTimeout(sync, 80);
   };
-  d.body.appendChild(b);
-  setInterval(function () {
-    const side = d.querySelector('section[data-testid="stSidebar"]');
-    const w = side ? side.getBoundingClientRect().width : 0;
-    b.style.display = w < 80 ? "block" : "none";
-  }, 250);
+  setInterval(sync, 250);
+  sync();
 })();
 </script>
     """,
@@ -515,26 +539,16 @@ with st.sidebar:
             st.caption("⚫ not running")
         st.caption("Decision cycle every 5min (market open only) · "
                    "morning briefing 9:25 ET · daily report 16:05 ET")
-        run_manual = st.button("Force cycle now", use_container_width=True,
-                               help="Only if Cloud slept or you want a "
-                                    "scan immediately. Not required.")
     st.write("")
+    # P9: the scheduler is the primary path now (fires every 5min during
+    # market hours, see SCHEDULER expander above) -- this button is a
+    # manual override for testing/impatience, no longer required for
+    # normal operation, so it's de-emphasized (no more `type="primary"`).
+    run = st.button("⚡ Force cycle now", use_container_width=True,
+                    help="Manual override — the scheduler already runs "
+                         "this automatically every 5 minutes during "
+                         "market hours.")
     render_cycle_countdown()
-
-    # Wake cycle: when the app process comes back (Cloud sleep, first
-    # open) and the market is open and the last scan is stale, run once
-    # without a button. Scheduler keeps going after that.
-    last_scan = state.get("decision_cycle.last_scan") or {}
-    last_ts = float(last_scan.get("ts") or 0)
-    stale = (time.time() - last_ts) > 300
-    session_open = market_status().get("session") == "open"
-    if "wake_cycle_done" not in st.session_state:
-        st.session_state.wake_cycle_done = False
-    auto_wake = (session_open and stale
-                 and not st.session_state.wake_cycle_done)
-    if auto_wake:
-        st.session_state.wake_cycle_done = True
-    run = bool(run_manual or auto_wake)
 
     # BUG FIX 3 + auto-feed: start once on app load, no button press
     # needed. _autostart_feed is st.cache_resource (process-wide, runs
