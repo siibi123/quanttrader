@@ -37,19 +37,13 @@ ACCENT = "#22c55e"
 DEFAULT_CHART_SYMBOL = "AAPL"
 if "desk_open" not in st.session_state:
     st.session_state.desk_open = True
-_HIDE_SIDE = "" if st.session_state.desk_open else """
-section[data-testid="stSidebar"] {{
-  display: none !important;
-  width: 0 !important;
-  min-width: 0 !important;
-  transform: none !important;
-}}
-div[data-testid="stAppViewContainer"] .main,
-[data-testid="stMain"] {{
-  margin-left: 0 !important;
-}}
-.block-container {{ padding-top: 1.1rem !important; }}
-"""
+
+def _close_desk():
+    st.session_state.desk_open = False
+
+def _open_desk():
+    st.session_state.desk_open = True
+
 st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
@@ -73,7 +67,6 @@ section[data-testid="stSidebar"] [data-testid="stBaseButton-header"],
 section[data-testid="stSidebar"] button[kind="header"] {{
   display: none !important;
 }}
-{_HIDE_SIDE}
 
 .block-container {{
   padding-top: 1.1rem; max-width: 1480px !important; padding-bottom: 3rem;
@@ -276,12 +269,16 @@ def render_cycle_countdown():
 
 # ---------------------------------------------------------------------------
 # LEFT RAIL
+# When the desk is closed we do NOT render st.sidebar at all. Streamlit
+# then has nothing to show on the left — no CSS fight, no hidden chevron.
+# Widget values live in session_state keys so they survive the hide.
 # ---------------------------------------------------------------------------
-with st.sidebar:
-    if st.button("Close desk", type="primary", use_container_width=True,
-                 key="qt_close_desk"):
-        st.session_state.desk_open = False
-        st.rerun()
+if st.session_state.desk_open:
+  with st.sidebar:
+    _cr, _ = st.columns([1, 1])
+    with _cr:
+        st.button("Close desk", type="primary", key="qt_close_desk",
+                  on_click=_close_desk, use_container_width=True)
     st.markdown("<div class='qt-logo'>◆ Quant<span>Trader</span></div>"
                 "<div class='qt-sub'>AUTONOMOUS PAPER DESK</div>",
                 unsafe_allow_html=True)
@@ -289,9 +286,11 @@ with st.sidebar:
     with st.expander("INSTRUMENT", expanded=True):
         chart_sym = (st.text_input(
             "Chart symbol (type any ticker)",
-            DEFAULT_CHART_SYMBOL).strip().upper() or DEFAULT_CHART_SYMBOL)
+            DEFAULT_CHART_SYMBOL, key="ui_chart_sym").strip().upper()
+            or DEFAULT_CHART_SYMBOL)
         state.set("ui.chart_symbol", chart_sym, source="ui")
-        tf = st.select_slider("Timeframe", ["1h", "1d", "1wk"], value="1d")
+        tf = st.select_slider("Timeframe", ["1h", "1d", "1wk"],
+                              value="1d", key="ui_tf")
         st.caption("This only picks what the CHART tab displays — the "
                   "decision cycle always scans the full universe below, "
                   "regardless of this symbol.")
@@ -519,6 +518,25 @@ with st.sidebar:
     if scan_prog:
         st.caption(f"Scanned {scan_prog['scanned']}/{scan_prog['total']} "
                   f"symbols this cycle")
+else:
+    chart_sym = (st.session_state.get("ui_chart_sym")
+                 or DEFAULT_CHART_SYMBOL).strip().upper()
+    tf = st.session_state.get("ui_tf", "1d")
+    rp = float(st.session_state.get("desk_risk_cap", 1.0))
+    discount_zone = bool(st.session_state.get("discount_zone", True))
+    deep = bool(cfg.lse_api_key)
+    news_pass = bool(cfg.news_api_key)
+    macro_pass = bool(cfg.lse_api_key)
+    aum_in = float(st.session_state.get("aum_in", cfg.aum or cfg.starting_cash))
+    mode_val = st.session_state.get("mode_val", cfg.max_position_mode or "pct")
+    pct_cap_in = float(st.session_state.get("pct_cap_in", cfg.max_position_pct))
+    fixed_cap_in = float(st.session_state.get("fixed_cap_in",
+                         cfg.max_position_fixed_usd or 1000.0))
+    bypass_gate = bool(st.session_state.get("p7a_bypass", True))
+    run = False
+    state.set("ui.chart_symbol", chart_sym, source="ui")
+    if "feed_auto_started" not in st.session_state:
+        st.session_state.feed_auto_started = _autostart_feed(feed)
 
 E["risk"].cfg = dataclasses.replace(
     cfg, aum=aum_in, max_position_mode=mode_val,
@@ -605,10 +623,8 @@ def render_open_book():
 if not st.session_state.desk_open:
     _oc, _ = st.columns([1, 5])
     with _oc:
-        if st.button("Open desk", type="primary", use_container_width=True,
-                     key="qt_open_desk"):
-            st.session_state.desk_open = True
-            st.rerun()
+        st.button("Open desk", type="primary", use_container_width=True,
+                  key="qt_open_desk", on_click=_open_desk)
 nav_l, nav_r = st.columns([4, 1])
 with nav_l:
     st.markdown("""
@@ -961,6 +977,14 @@ with t_trades:
                        "Secrets so trades survive Cloud restarts.")
 
 with t_lab:
+    tape = state.get("desk.tape") or {}
+    sessg = state.get("desk.session_gate") or {}
+    if tape or sessg:
+        st.markdown(
+            f"<div class='qt-panel'><span class='qt-kicker'>Free tape · Yahoo VIX/TNX/SPY</span><br>"
+            f"{tape.get('why', 'tape not read yet')}<br>"
+            f"{sessg.get('why', '')}</div>",
+            unsafe_allow_html=True)
     st.markdown("<div class=\'qt-kicker\'>Live desk — feeds the cycle automatically</div>",
                 unsafe_allow_html=True)
     st.caption("No buttons. Stress, sector rank, flow, execution quality and "

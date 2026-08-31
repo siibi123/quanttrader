@@ -74,8 +74,15 @@ def filter_price_outliers(df: pd.DataFrame, window: int = 20,
         return df
     ratio = df["High"] / df["Low"].replace(0, np.nan)
     roll_avg = ratio.rolling(window, min_periods=window).mean()
-    is_outlier = (ratio > roll_avg * mult).fillna(False)
-    return df[~is_outlier]
+    range_spike = (ratio > roll_avg * mult).fillna(False)
+    # Hampel on close-to-close: a single print that jumps >5σ of the
+    # last `window` returns is almost always a vendor glitch on Yahoo.
+    rets = df["Close"].pct_change()
+    med = rets.rolling(window, min_periods=window).median()
+    mad = (rets - med).abs().rolling(window, min_periods=window).median()
+    sigma = (1.4826 * mad).replace(0, np.nan)
+    close_spike = ((rets - med).abs() > 5.0 * sigma).fillna(False)
+    return df[~(range_spike | close_spike)]
 
 
 # ---------------------------------------------------------------------------

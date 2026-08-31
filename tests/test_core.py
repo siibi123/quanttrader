@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # `shutil.rmtree("runtime")` used to delete the whole directory on every
 # test run -- on a dev machine that's also running the real app, that
 # wiped real trading/audit history. Never widen this back to "runtime".
+os.environ["QT_OFFLINE"] = "1"
 shutil.rmtree("runtime/_test", ignore_errors=True)
 
 # Pin the gist singleton to a disabled store so a developer machine (or
@@ -1511,6 +1512,34 @@ _kept, _side, _lead = _egate(
 check("sector_etf: gate keeps top sectors + unclassified, sidelines the rest",
       {n["ticker"] for n in _kept} == {"A", "C", "E", "F"}
       and {n["ticker"] for n in _side} == {"B", "D"})
+
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from quant.session_gate import allow_new_entries as _sne
+_et = ZoneInfo("America/New_York")
+_open_ok = datetime(2026, 8, 31, 11, 0, tzinfo=_et)   # Monday 11:00 ET
+_open_early = datetime(2026, 8, 31, 9, 35, tzinfo=_et)
+_closed = datetime(2026, 8, 30, 12, 0, tzinfo=_et)    # Sunday
+check("session_gate: interior RTH allows new entries",
+      _sne(_open_ok)["ok"] is True)
+check("session_gate: first 15 minutes blocks new entries",
+      _sne(_open_early)["ok"] is False)
+check("session_gate: weekend blocks new entries",
+      _sne(_closed)["ok"] is False)
+
+from quant.macro_tape import read_tape as _rt
+check("macro_tape: offline flag is a no-op, not a crash",
+      _rt()["why"] == "offline" and _rt()["size_mult"] == 1.0)
+
+_spike = pd.DataFrame({
+    "Open": [10]*25 + [10],
+    "High": [10.1]*25 + [80],
+    "Low": [9.9]*25 + [9.9],
+    "Close": [10]*25 + [80],
+    "Volume": [1e6]*26,
+})
+check("outlier filter: a 8x close print is dropped",
+      len(filter_price_outliers(_spike)) == 25)
 
 print("\n" + "=" * 44)
 passed = sum(1 for _, ok in results if ok)

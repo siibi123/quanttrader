@@ -1091,6 +1091,16 @@ class RuleOrchestrator:
         fills = []
         prices_seen = {}
         may_enter = True
+        try:
+            from quant.macro_tape import read_tape
+            from quant.session_gate import allow_new_entries
+            tape = read_tape()
+            sess = allow_new_entries()
+            self._state.set("desk.tape", tape, source="orchestrator")
+            self._state.set("desk.session_gate", sess, source="orchestrator")
+        except Exception:
+            tape = {"risk_off": False, "size_mult": 1.0, "why": "tape n/a"}
+            sess = {"ok": True, "why": "session gate n/a"}
         incubation_bypassed = False
         if self._registry:
             self._registry.settle_signals(self.STRATEGY_NAME, self._settle_price)
@@ -1161,6 +1171,20 @@ class RuleOrchestrator:
                                           regime=rc["regime"])
 
             if sig["signal"] == "BUY" and not held and price > 0:
+                if not sess.get("ok", True):
+                    self._audit.record(
+                        "Orchestrator", "STAND DOWN (SESSION)",
+                        trigger=f"signals.{s}", model="rule-v1",
+                        reasoning=f"{s}: {sess.get('why')}",
+                        data={"symbol": s, "signal": "BUY"})
+                    continue
+                if tape.get("size_mult", 1.0) <= 0:
+                    self._audit.record(
+                        "Orchestrator", "STAND DOWN (TAPE)",
+                        trigger=f"signals.{s}", model="rule-v1",
+                        reasoning=f"{s}: {tape.get('why')}",
+                        data={"symbol": s, "signal": "BUY", "tape": tape})
+                    continue
                 if not may_enter:
                     self._audit.record(
                         "Orchestrator", "SIGNAL LOGGED (INCUBATION)",
@@ -1221,6 +1245,8 @@ class RuleOrchestrator:
                     qty = int(qty * stress_budget["size_multiplier"])
                 if cb and cb["size_multiplier"] < 1.0:
                     qty = int(qty * cb["size_multiplier"])
+                if tape.get("size_mult", 1.0) < 1.0:
+                    qty = int(qty * float(tape["size_mult"]))
                 if qty < 1:
                     self._audit.record(
                         "Orchestrator", "SIGNAL LOGGED (SIZE ROUNDED TO 0)",
