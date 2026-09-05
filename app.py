@@ -1059,6 +1059,20 @@ with t_lab:
         st.caption(f"Last morning {brief.get('date', '—')} · last close {last_rep.get('date', '—')}")
 
 with t_audit:
+    st.markdown("### Desk journal")
+    st.caption("What a second person reads in the morning — ticker, decision, why. Saved to gist as journal.jsonl.")
+    try:
+        from core.journal import tail as journal_tail
+        jrows = journal_tail(80)
+    except Exception:
+        jrows = []
+    if jrows:
+        import pandas as _pd
+        st.dataframe(
+            _pd.DataFrame(jrows)[["when", "ticker", "decision", "who", "why"]],
+            use_container_width=True, hide_index=True)
+    else:
+        st.caption("Empty until the next veto / stand-down / fill. Older AUDIT lines below stay as the raw trail.")
     st.markdown("### Audit timeline — trigger → model → reasoning")
     last_scan = state.get("decision_cycle.last_scan")
     if last_scan:

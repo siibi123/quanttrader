@@ -24,6 +24,7 @@ GIST_DESCRIPTION = "quanttrader-runtime"
 TRACKED = (
     "broker.json",
     "audit.jsonl",
+    "journal.jsonl",
     "strategy_registry.json",
     "circuit_breaker.json",
 )
@@ -32,6 +33,7 @@ API = "https://api.github.com/gists"
 _EMPTY = {
     "broker.json": "{}",
     "audit.jsonl": "# quanttrader audit log\n",
+    "journal.jsonl": "# quanttrader desk journal\n",
     "strategy_registry.json": "{}",
     "circuit_breaker.json": "{}",
 }

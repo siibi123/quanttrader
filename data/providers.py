@@ -19,6 +19,7 @@ import pandas as pd
 import requests
 
 from core.state import Event, EventBus, GlobalState, market_status
+from data.candle_cache import CACHE as _CANDLE_CACHE
 
 
 class DataProvider(ABC):
@@ -398,11 +399,17 @@ class CompositeProvider(DataProvider):
         self.providers, self._state = providers, state
 
     def get_candles(self, symbol, interval="1d", lookback="2y"):
+        hit = _CANDLE_CACHE.get(symbol, interval, lookback)
+        if hit is not None:
+            return hit
         for p in self.providers:
             df = p.get_candles(symbol, interval, lookback)
             if len(df):
+                _CANDLE_CACHE.put(symbol, interval, lookback, df)
                 if self._state:
                     self._state.set(f"feed.served_by.{symbol}", p.name,
+                                    source="data")
+                    self._state.set("feed.cache", _CANDLE_CACHE.stats(),
                                     source="data")
                 return df
         return pd.DataFrame()
@@ -422,15 +429,28 @@ class CompositeProvider(DataProvider):
         anything it didn't return falls back to the normal per-symbol
         provider chain."""
         out: dict[str, pd.DataFrame] = {}
+        missing: list[str] = []
+        for s in symbols:
+            hit = _CANDLE_CACHE.get(s, interval, lookback)
+            if hit is not None:
+                out[s] = hit
+            else:
+                missing.append(s)
         yahoo = next((p for p in self.providers
                      if isinstance(p, YahooProvider)), None)
-        if yahoo:
-            out = yahoo.get_candles_batch(symbols, interval, lookback)
-        for s in symbols:
+        if yahoo and missing:
+            fetched = yahoo.get_candles_batch(missing, interval, lookback)
+            for s, df in fetched.items():
+                if len(df):
+                    _CANDLE_CACHE.put(s, interval, lookback, df)
+                    out[s] = df
+        for s in missing:
             if not len(out.get(s, pd.DataFrame())):
                 df = self.get_candles(s, interval, lookback)
                 if len(df):
                     out[s] = df
+        if self._state:
+            self._state.set("feed.cache", _CANDLE_CACHE.stats(), source="data")
         return out
 
     def get_quotes_batch(self, symbols: list[str]) -> dict[str, dict]:

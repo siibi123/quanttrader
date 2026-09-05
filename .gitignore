@@ -5,3 +5,5 @@ reports/
 .env
 .venv/
 venv/
+.env.save
+.env

@@ -76,6 +76,11 @@ class AuditLog:
             except Exception:
                 pass
             sync_runtime_file(self._path, immediate=False)
+        try:
+            from .journal import append_from_audit
+            append_from_audit(rec)
+        except Exception:
+            pass
         self._bus.publish(Event("audit.record", rec, source=actor))
         return rec
 
